@@ -307,8 +307,25 @@ public struct CONSOLE_FONT_INFOEX {
 public static extern bool SetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int coords);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
+[DllImport("user32.dll")] public static extern bool ShowScrollBar(IntPtr h, int bar, bool show);
 '@
 } catch {}
+
+# Conhost adds scrollbars during transient buffer/window mismatches (e.g.
+# the default 120-wide buffer meeting a narrower fullscreen window at
+# startup) and does NOT reliably remove them once the sizes agree again -
+# the bar just lingers, dead. Hide it explicitly whenever it's present.
+function Hide-Scrollbars {
+    try {
+        $h = [CLI.Native]::GetConsoleWindow()
+        $style = [CLI.Native]::GetWindowLong($h, -16)
+        if ($style -band 0x00300000) {   # WS_HSCROLL | WS_VSCROLL
+            [CLI.Native]::ShowScrollBar($h, 3, $false) | Out-Null   # SB_BOTH
+        }
+    } catch {}
+}
 
 # Deliberately simple: set a readable font, ask conhost for its native
 # fullscreen (the same mode Alt+Enter toggles), make buffer == window.
@@ -338,6 +355,7 @@ function Set-ConsoleFullscreen {
         } catch {}
         $ws = $Host.UI.RawUI.WindowSize
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
+        Hide-Scrollbars
         $script:isFullscreen = $true
     } catch {}
 }
@@ -355,6 +373,7 @@ function Set-ConsoleWindowed {
             $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
         } catch {}
+        Hide-Scrollbars
         $script:isFullscreen = $false
     } catch {}
 }
@@ -876,6 +895,7 @@ function Read-InputKey {
                     $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cw, $ch)
                 }
             } catch {}
+            Hide-Scrollbars   # conhost leaves stale bars behind after transient mismatches
         }
         Start-Sleep -Milliseconds 16
     }
