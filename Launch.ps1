@@ -29,6 +29,6 @@ if ($hwnd -ne [IntPtr]::Zero) {
 
 # conhost, NOT Windows Terminal: WT's WinUI tab bar responds to the physical
 # gamepad (XAML directional navigation, not disableable) and steals focus.
-# Conhost has no WinUI, and SteamMenu.ps1 makes it borderless fullscreen.
+# Conhost has no WinUI, and CLInt.ps1 makes it borderless fullscreen.
 Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\SteamMenu.ps1`""
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""

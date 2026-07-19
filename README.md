@@ -34,9 +34,9 @@ controller disconnects mid-session.
 
 | File | Purpose |
 | --- | --- |
-| `SteamMenu.ps1` | The menu itself. Runs under **conhost**, fullscreen. |
+| `CLInt.ps1` | The menu itself. Runs under **conhost**, fullscreen. |
 | `Launch.ps1` | Single-instance launcher the desktop shortcut runs: focus / minimize / start. |
-| `SteamMenuKey.ahk` | Optional: binds a hardware key to the same toggle (key name read from `menu-key.txt`, default AppsKey). |
+| `CLIntKey.ahk` | Optional: binds a hardware key to the same toggle (key name read from `menu-key.txt`, default AppsKey). |
 | `Install.ps1` / `Install.bat` | One-shot setup: desktop shortcut, plus an optional press-a-key hotkey binding (offers to install AutoHotkey v2 if you want it). |
 | `Update.ps1` | The updater behind SETTINGS → Check for updates. |
 | `version.txt` | Current version, shown bottom-right in the app. |
@@ -72,7 +72,7 @@ and steals focus onto the tabs. Conhost has no WinUI, so it's immune, and
 
 ## Single instance
 
-Every launch path funnels into one window: `SteamMenu.ps1` holds a named
+Every launch path funnels into one window: `CLInt.ps1` holds a named
 mutex (`Local\CLIntMenu`); a losing second instance just focuses or
 minimizes the existing window (matched by the window title `CLInt`) and
 exits.

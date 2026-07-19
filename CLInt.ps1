@@ -1,4 +1,4 @@
-# SteamMenu.ps1 - CLInt: interactive terminal launcher for installed Steam games.
+# CLInt.ps1 - fast, gamepad-driven launcher for games and videos.
 # Scans Steam's appmanifest files (no AI, no network) and launches the
 # selected game via the steam:// protocol.
 #
@@ -10,7 +10,7 @@ param([switch]$List)
 $ErrorActionPreference = 'Stop'
 
 # Single instance: whichever way a second copy gets started (desktop
-# shortcut, AppsKey via SteamMenuKey.ahk, direct run), it defers to the
+# shortcut, AppsKey via CLIntKey.ahk, direct run), it defers to the
 # running one - focus it, or minimize it if it's frontmost - and exits.
 if (-not $List) {
     $script:instanceMutex = New-Object System.Threading.Mutex($false, 'Local\CLIntMenu')
@@ -38,7 +38,7 @@ if (-not $List) {
     }
 }
 
-$Host.UI.RawUI.WindowTitle = 'CLInt'   # matched by Launch.ps1, SteamMenuKey.ahk and claude-gamepad.ahk
+$Host.UI.RawUI.WindowTitle = 'CLInt'   # matched by Launch.ps1, CLIntKey.ahk and claude-gamepad.ahk
 
 function Get-SteamPath {
     $p = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue).SteamPath
@@ -745,7 +745,7 @@ try {
                                 $script:instanceMutex.Dispose()
                             }
                             Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
-                                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\SteamMenu.ps1`""
+                                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""
                             exit 0
                         }
                         Write-Host ""

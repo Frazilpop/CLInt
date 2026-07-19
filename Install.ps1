@@ -95,13 +95,13 @@ if ($wantKey -notmatch '^[nN]') {
         }
         Set-Content -Path (Join-Path $here 'menu-key.txt') -Value $keyName -Encoding Ascii
 
-        $startupLnk = $wsh.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'SteamMenuKey.lnk'))
+        $startupLnk = $wsh.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'CLIntKey.lnk'))
         $startupLnk.TargetPath = $ahk
-        $startupLnk.Arguments  = "`"$(Join-Path $here 'SteamMenuKey.ahk')`""
+        $startupLnk.Arguments  = "`"$(Join-Path $here 'CLIntKey.ahk')`""
         $startupLnk.Save()
         Write-Host "  Startup entry created (hotkey loads on every boot)" -ForegroundColor Green
 
-        Start-Process $ahk -ArgumentList "`"$(Join-Path $here 'SteamMenuKey.ahk')`""
+        Start-Process $ahk -ArgumentList "`"$(Join-Path $here 'CLIntKey.ahk')`""
         Write-Host "  Hotkey is active NOW - press it to test." -ForegroundColor Cyan
     }
 } else {
