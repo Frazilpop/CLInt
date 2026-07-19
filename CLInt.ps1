@@ -289,22 +289,6 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
     } catch {}
 }
 
-# VT (24-bit color) for the corner version badge only: the 16-color console
-# palette has nothing between DarkGray and invisible, so paint it a
-# near-black gray via an escape sequence when conhost allows it.
-$script:vtOn = $false
-try {
-    Add-Type -Namespace CLIntVT -Name Con -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
-[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
-[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
-'@
-    $vtH = [CLIntVT.Con]::GetStdHandle(-11); $vtM = 0
-    if ([CLIntVT.Con]::GetConsoleMode($vtH, [ref]$vtM)) {
-        $script:vtOn = [CLIntVT.Con]::SetConsoleMode($vtH, $vtM -bor 4)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    }
-} catch {}
-
 # Focus tracking: XInput delivers controller state regardless of which
 # window has keyboard focus, so the menu must check it holds the
 # foreground before acting - otherwise a still-focused app behind us
@@ -656,10 +640,6 @@ function Draw-All {
             elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
     Write-At 15 3 $help $theme.Hint
-    $ver = "v$appVersion"
-    [Console]::SetCursorPosition($W - $ver.Length - 2, $H - 1)
-    if ($script:vtOn) { [Console]::Write("$([char]27)[38;2;55;55;55m$ver$([char]27)[0m") }
-    else              { Write-Host $ver -ForegroundColor $theme.Hint -NoNewline }
     if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' $theme.Hint }
     Draw-List
 }
