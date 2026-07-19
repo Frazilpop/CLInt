@@ -818,8 +818,9 @@ function Get-StatusText {
 function Draw-Status {
     try {
         if ($W -le 40) { return }
-        $txt = (Get-StatusText).PadLeft(14)
-        Write-At ($W - 16) 2 $txt $theme.Info
+        # top-right corner, on the tab-bar row (which reserves this space)
+        $txt = (Get-StatusText).PadLeft(12)
+        Write-At ($W - 13) 0 $txt $theme.Info
         $script:statusLast = $txt
     } catch {}
 }
@@ -851,7 +852,9 @@ function Draw-All {
     # the names themselves so every tab stays visible and nothing can ever
     # write past the row's end (which would wrap or scroll).
     $x = 15
-    $avail = [Math]::Max(10, $W - $x - 1)
+    # keep clear of the clock/battery in the top-right corner
+    $statusReserve = if (Get-StatusText) { 14 } else { 0 }
+    $avail = [Math]::Max(10, $W - $x - 1 - $statusReserve)
     $names = @($tabs | ForEach-Object { [string]$_.Name })
     $nameLen = ($names | ForEach-Object { $_.Length } | Measure-Object -Sum).Sum
     $padLen = 2; $gap = 2
@@ -1391,8 +1394,20 @@ try {
         switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
-            'PageDown'  { Move-Selection $visible }      # LB on the pad
-            'PageUp'    { Move-Selection (-$visible) }
+            'PageDown'  {   # LB: a page at a time, clamped to the end -
+                            # free-running modulo math on a list barely
+                            # longer than a page LOOKS like reverse cycling
+                if ($items.Count -gt 0) {
+                    if ($selected -ge $items.Count - 1) { Move-Selection (-($items.Count - 1)) }   # at the end: wrap to top
+                    else { Move-Selection ([Math]::Min($visible, $items.Count - 1 - $selected)) }
+                }
+            }
+            'PageUp'    {
+                if ($items.Count -gt 0) {
+                    if ($selected -le 0) { Move-Selection ($items.Count - 1) }   # at the top: wrap to end
+                    else { Move-Selection (-([Math]::Min($visible, $selected))) }
+                }
+            }
             'Home'      { Move-Selection (-$selected) }
             'End'       { Move-Selection ($items.Count - 1 - $selected) }
             'LeftArrow'  { Switch-Tab -1 }
