@@ -31,11 +31,15 @@ A_IconTip := "CLInt menu key: " keyName
 ToggleMenu(*) {
     SetTitleMatchMode 3  ; exact title only
     if hwnd := WinExist("CLInt") {
-        if WinActive(hwnd) {
+        ; Minimized wins over "active": right after minimizing, Windows can
+        ; still report the window as active (focus sits on the taskbar), and
+        ; checking active first made the second press a no-op.
+        if WinGetMinMax(hwnd) = -1 {
+            WinRestore hwnd
+            WinActivate hwnd
+        } else if WinActive(hwnd) {
             WinMinimize hwnd
         } else {
-            if WinGetMinMax(hwnd) = -1
-                WinRestore hwnd
             WinActivate hwnd
         }
     } else {

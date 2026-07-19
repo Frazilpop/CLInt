@@ -16,11 +16,13 @@ public static extern IntPtr FindWindowW(string cls, string title);
 
 $hwnd = [Win32.Native]::FindWindowW($null, 'CLInt')
 if ($hwnd -ne [IntPtr]::Zero) {
-    if ([Win32.Native]::GetForegroundWindow() -eq $hwnd) {
-        [Win32.Native]::ShowWindow($hwnd, 6) | Out-Null       # SW_MINIMIZE
-    } elseif ([Win32.Native]::IsIconic($hwnd)) {
+    # Minimized wins over "foreground": right after minimizing, Windows can
+    # still report the window as foreground, which made a second press no-op.
+    if ([Win32.Native]::IsIconic($hwnd)) {
         [Win32.Native]::ShowWindow($hwnd, 9) | Out-Null       # SW_RESTORE
         [Win32.Native]::SetForegroundWindow($hwnd) | Out-Null
+    } elseif ([Win32.Native]::GetForegroundWindow() -eq $hwnd) {
+        [Win32.Native]::ShowWindow($hwnd, 6) | Out-Null       # SW_MINIMIZE
     } else {
         [Win32.Native]::SetForegroundWindow($hwnd) | Out-Null
     }
