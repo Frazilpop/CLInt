@@ -137,8 +137,13 @@ $localGames = @()   # filled by Update-LocalGames once MA profiles are known
 # Motion Assistant uses (its WinRing0 driver is already loaded, so no
 # elevation is needed). RB / F5 cycles: default -> 12W -> 15W -> 18W -> 5W.
 # The pre-launch limits are captured and restored when the game closes.
+#
+# The whole feature only activates when Motion Assistant is actually
+# installed on this machine; without it CLInt is a plain launcher and no
+# TDP hint or keybind appears anywhere.
 
-$ryzenAdj   = 'C:\Users\frazi\Documents\MotionAssistant\amd\ryzenadj.exe'
+$maDir      = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'MotionAssistant'
+$ryzenAdj   = Join-Path $maDir 'amd\ryzenadj.exe'
 $tdpEnabled = Test-Path $ryzenAdj
 $tdpModes   = @(0, 12, 15, 18, 5)          # 0 = leave TDP alone
 $tdpFile    = Join-Path $PSScriptRoot 'tdp-settings.json'
@@ -178,7 +183,7 @@ function Set-Tdp([double]$stapmW, [double]$fastW, [double]$slowW) {
 # (Profiles\Process\<exename>.ini) and would fight anything the menu sets.
 # Flag those games by matching their exe names against the profile list,
 # and lock the menu's TDP toggle for them.
-$maProfileNames = @(Get-ChildItem 'C:\Users\frazi\Documents\MotionAssistant\Profiles\Process\*.ini' `
+$maProfileNames = @(Get-ChildItem (Join-Path $maDir 'Profiles\Process\*.ini') `
     -ErrorAction SilentlyContinue | ForEach-Object { $_.BaseName })
 
 function Add-MaProfileTags($list) {
@@ -256,7 +261,7 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
 }
 
 # One mascot per tab: rocket = Steam launches, handheld = local games on
-# the GPD itself, VHS = videos.
+# this machine, VHS = videos.
 $logos = @(
     @(
     '    /\'

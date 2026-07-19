@@ -70,7 +70,7 @@ if ($wantKey -notmatch '^[nN]') {
         Write-Host "  Press the key you want to use, now." -ForegroundColor Cyan
         Write-Host "  Best picks are keys you never type with: a handheld's menu/page" -ForegroundColor DarkGray
         Write-Host "  key, a spare F-key, a macro key. Esc keeps the default (AppsKey," -ForegroundColor DarkGray
-        Write-Host "  the menu key next to right Ctrl / the GPD 'page icon' key)." -ForegroundColor DarkGray
+        Write-Host "  the menu key found next to right Ctrl on full keyboards)." -ForegroundColor DarkGray
         $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
         $vk = $k.VirtualKeyCode
 

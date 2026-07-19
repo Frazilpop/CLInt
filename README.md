@@ -1,9 +1,8 @@
 # CLInt
 
-A gamepad-driven, full-screen terminal launcher for games and videos on
-Windows handhelds (built on a GPD Win Mini). Pixel-art mascots, four tabs,
-no mouse or keyboard needed — the name is a pun on CLI, because the whole
-thing runs in a console window.
+A fast, gamepad-driven, full-screen launcher for games and videos on
+Windows. Pixel-art mascots, four tabs, and no mouse or keyboard needed —
+point it at your libraries, press A, play.
 
 ## What it does
 
@@ -15,10 +14,12 @@ thing runs in a console window.
 - **VIDEOS** — a folder browser that plays files via VLC fullscreen.
 - **SETTINGS** — video and game-shortcut folders, picked with the gamepad,
   persisted to `settings.json`.
-- **Per-game TDP** — RB cycles default → 12W → 15W → 18W → 5W per game,
-  applied at launch with GPD Motion Assistant's bundled `ryzenadj` (works
-  unelevated because Motion Assistant's driver is already loaded) and
-  restored when the game exits. Stored in `tdp-settings.json`.
+- **Per-game TDP** (only on machines with GPD Motion Assistant) — RB
+  cycles default → 12W → 15W → 18W → 5W per game, applied at launch with
+  Motion Assistant's bundled `ryzenadj` (works unelevated because its
+  driver is already loaded) and restored when the game exits. Stored in
+  `tdp-settings.json`. Auto-detected: without Motion Assistant the
+  feature stays completely hidden and CLInt is a plain launcher.
 
 ## Controls
 
