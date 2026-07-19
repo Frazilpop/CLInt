@@ -494,9 +494,13 @@ function Write-At([int]$x, [int]$y, [string]$text, $fg, $bg) {
     else     { Write-Host $text -ForegroundColor $fg -NoNewline }
 }
 
-function Pad([string]$s, [int]$w) {
-    if ($s.Length -gt $w) { return $s.Substring(0, $w - 3) + '...' }
-    return $s.PadRight($w)
+function Pad([string]$s, [int]$width) {
+    if ($width -lt 1) { return '' }
+    if ($s.Length -gt $width) {
+        if ($width -le 3) { return $s.Substring(0, $width) }
+        return $s.Substring(0, $width - 3) + '...'
+    }
+    return $s.PadRight($width)
 }
 
 function Get-Layout {
@@ -509,7 +513,7 @@ function Get-Layout {
 function Draw-GameLine([int]$i) {
     $y = $listTop + ($i - $offset)
     if ($i -lt $offset -or $i -ge $offset + $visible) { return }
-    $w = $W - 3
+    $lineW = $W - 3   # not $w: case-insensitively shadows $W (see Pick-Folder)
     $label = $items[$i].Name
     $type = $tabs[$tab].Type
     if ($type -in 'Steam', 'Shortcuts') {
@@ -518,10 +522,10 @@ function Draw-GameLine([int]$i) {
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
     }
     if ($i -eq $selected) {
-        Write-At 1 $y (Pad ("  >> " + $label + "  ") $w) 'Black' 'Cyan'
+        Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) 'Black' 'Cyan'
     } else {
         $fg = if ($type -eq 'Files' -and $items[$i].Type -ne 'File') { 'White' } else { 'Gray' }
-        Write-At 1 $y (Pad ("     " + $label + "  ") $w) $fg
+        Write-At 1 $y (Pad ("     " + $label + "  ") $lineW) $fg
     }
 }
 
@@ -723,14 +727,18 @@ function Pick-Folder([string]$label, [string]$start) {
         $rows = [Math]::Max(1, $H - $top - 1)
         if ($sel -lt $off) { $off = $sel }
         if ($sel -ge $off + $rows) { $off = $sel - $rows + 1 }
+        # NB: the row width must NOT be named $w - PowerShell variables are
+        # case-insensitive, so a local "$w = $W - 3" reads its own previous
+        # value from the second iteration on, shrinking the width by 3 per
+        # drawn row until string ops throw. That crashed the picker once.
+        $rowW = $W - 3
         for ($r = 0; $r -lt $rows; $r++) {
             $i = $off + $r
-            $w = $W - 3
             if ($i -lt $entries.Count) {
-                if ($i -eq $sel) { Write-At 1 ($top + $r) (Pad ('  >> ' + $entries[$i].Name + '  ') $w) 'Black' 'Cyan' }
-                else             { Write-At 1 ($top + $r) (Pad ('     ' + $entries[$i].Name + '  ') $w) 'Gray' }
+                if ($i -eq $sel) { Write-At 1 ($top + $r) (Pad ('  >> ' + $entries[$i].Name + '  ') $rowW) 'Black' 'Cyan' }
+                else             { Write-At 1 ($top + $r) (Pad ('     ' + $entries[$i].Name + '  ') $rowW) 'Gray' }
             } else {
-                Write-At 1 ($top + $r) (' ' * $w) 'Gray'
+                Write-At 1 ($top + $r) (' ' * $rowW) 'Gray'
             }
         }
         $key = Read-InputKey
@@ -782,18 +790,53 @@ function Pick-Option([string]$title, [string[]]$options) {
     }
 }
 
-# SETTINGS actions on a configured tab: reorder, retarget, or remove it.
+# Modal text prompt: type on the keyboard, Enter/A saves, Esc/B cancels.
+# Returns the text, or $null if cancelled. An empty result means "no
+# override" - callers treat it as "back to the automatic value".
+function Read-TextInput([string]$title, [string]$current) {
+    Clear-Host
+    Get-Layout
+    Write-At 2 0 (Pad $title ($W - 4)) 'Cyan'
+    Write-At 2 2 '[ type on the keyboard    Enter/A: save    Esc/B: cancel    empty: automatic name ]' 'DarkGray'
+    $text = $current
+    while ($true) {
+        Write-At 2 4 (Pad ('> ' + $text + '_') ($W - 4)) 'White'
+        if ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            switch ($k.Key) {
+                'Enter'     { return $text }
+                'Escape'    { return $null }
+                'Backspace' { if ($text.Length) { $text = $text.Substring(0, $text.Length - 1) } }
+                default     { if ($k.KeyChar -and -not [char]::IsControl($k.KeyChar)) { $text += $k.KeyChar } }
+            }
+        } else {
+            $p = Get-PadKey
+            if ($p -eq [ConsoleKey]::Enter)  { return $text }
+            if ($p -eq [ConsoleKey]::Escape) { return $null }
+            Start-Sleep -Milliseconds 16
+        }
+    }
+}
+
+# SETTINGS actions on a configured tab: rename, reorder, retarget, remove.
 function Edit-TabConfig([int]$i) {
     $cfg = $settings['Tabs'][$i]
     $opts = @()
     if ($cfg.Type -ne 'Steam') { $opts += 'Change folder' }
-    $opts += @('Move left', 'Move right', 'Remove tab', 'Cancel')
+    $opts += @('Rename tab', 'Move left', 'Move right', 'Remove tab', 'Cancel')
     $choice = Pick-Option "TAB $($i + 1): $($tabs[$i].Name)" $opts
     if ($choice -lt 0) { return }
     switch ($opts[$choice]) {
         'Change folder' {
             $p = Pick-Folder "new folder for this tab" $cfg.Path
             if ($p) { $cfg.Path = $p; $cfg.Remove('Name') }   # re-derive the title
+        }
+        'Rename tab' {
+            $n = Read-TextInput "RENAME TAB: $($tabs[$i].Name)" $(if ($cfg.Name) { [string]$cfg.Name } else { '' })
+            if ($null -ne $n) {
+                $n = $n.Trim()
+                if ($n) { $cfg.Name = $n } else { $cfg.Remove('Name') }   # empty = automatic
+            }
         }
         'Move left' {
             if ($i -gt 0) {
