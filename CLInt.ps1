@@ -609,7 +609,25 @@ $isFullscreen = $false   # what the window IS right now (owned by the Set-Consol
 # tabs plus SETTINGS is what a fullscreen console row actually fits.
 $MAX_TABS = 8
 
-$vlcExe     = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
+# VLC is optional-but-recommended: with it, videos play fullscreen and
+# the menu waits for playback to end (and resume markers work); without
+# it, videos open in the default player. Look beyond the standard install
+# path: the registry App Paths entry, then common locations.
+function Find-Vlc {
+    $cands = @()
+    try {
+        $rp = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe' -ErrorAction SilentlyContinue).'(default)'
+        if ($rp) { $cands += $rp }
+    } catch {}
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "$env:LOCALAPPDATA\Programs")) {
+        if ($base) { $cands += (Join-Path $base 'VideoLAN\VLC\vlc.exe') }
+    }
+    foreach ($c in $cands) {
+        try { if ($c -and (Test-Path $c)) { return $c } } catch {}
+    }
+    return $null
+}
+$vlcExe     = Find-Vlc
 $videoExtRe = '^\.(mp4|mkv|avi|webm|mov|m4v|wmv|mpg|mpeg|ts|flv)$'
 
 # File-browser tabs: '..' first (in subfolders), then folders that contain
@@ -757,7 +775,12 @@ function Get-SettingsItems {
         try { $nv = ([string](Get-Content $marker -TotalCount 1)).Trim() } catch {}
         if ($nv) { $updName += "  ->  v$nv available" }
     }
+    if (-not $vlcExe) {
+        $list += [pscustomobject]@{ Key = 'VlcInfo'
+                                    Name = 'VLC not detected - videos will open in the default player' }
+    }
     $list += [pscustomobject]@{ Key = 'Update'; Name = $updName }
+    $list += [pscustomobject]@{ Key = 'ClearHist'; Name = '[ clear history ]' }
     $list += [pscustomobject]@{ Key = 'Quit'; Name = '[ quit CLInt ]' }
     return $list
 }
@@ -1521,6 +1544,25 @@ try {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
                         'Quit'   { Clear-Host; exit 0 }
+                        'VlcInfo' {
+                            $script:pendingNotice = 'With VLC (videolan.org): fullscreen playback, the menu returns when a video ends, and resume markers work.'
+                        }
+                        'ClearHist' {
+                            $c = Pick-Option 'CLEAR HISTORY' @(
+                                'Recently played (games)', 'Video play counts', 'Both', 'Cancel')
+                            if ($c -eq 0 -or $c -eq 2) {
+                                $script:recentMap = @{}
+                                Remove-Item (Join-Path $PSScriptRoot 'recent.json') -Force -ErrorAction SilentlyContinue
+                            }
+                            if ($c -eq 1 -or $c -eq 2) {
+                                $script:watchMap = @{}
+                                Remove-Item (Join-Path $PSScriptRoot 'watch-history.json') -Force -ErrorAction SilentlyContinue
+                            }
+                            if ($c -ge 0 -and $c -le 2) {
+                                Build-Tabs
+                                $script:pendingNotice = 'History cleared'
+                            }
+                        }
                         'Fullscreen' {
                             # Session-only: nothing is persisted, so the next
                             # launch always starts fullscreen again.
@@ -1620,7 +1662,7 @@ try {
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
                     if ($script:videoHistEnabled -and $isVideo) { Record-VideoPlay $v.Path }
-                    if ($isVideo -and (Test-Path $vlcExe)) {
+                    if ($isVideo -and $vlcExe) {
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
                     } else {
