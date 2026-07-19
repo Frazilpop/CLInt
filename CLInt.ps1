@@ -254,9 +254,8 @@ if ($List) {
 # WinUI at all, so it's immune. This turns the plain conhost window into a
 # borderless fullscreen surface with a readable font. Safely no-ops under WT
 # (its ConPTY console window is hidden) and on any API failure.
-function Set-ConsoleFullscreen {
-    try {
-        Add-Type -Namespace CLI -Name Native -MemberDefinition @'
+try {
+    Add-Type -Namespace CLI -Name Native -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 public struct CONSOLE_FONT_INFOEX {
@@ -268,7 +267,19 @@ public struct CONSOLE_FONT_INFOEX {
 public static extern bool SetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int coords);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleDisplayMode(out uint mode);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
+[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int idx, int val);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 '@
+} catch {}
+
+function Set-ConsoleFullscreen {
+    try {
         $out = [CLI.Native]::GetStdHandle(-11)
 
         $font = New-Object CLI.Native+CONSOLE_FONT_INFOEX
@@ -277,13 +288,71 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
         $font.FaceName = 'Consolas'
         [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
 
-        # conhost's native fullscreen (what Alt+Enter toggles): borderless,
-        # at the origin, with black padding to the screen edges
+        # First choice: conhost's native fullscreen (what Alt+Enter toggles):
+        # borderless, at the origin, black padding to the screen edges.
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
         Start-Sleep -Milliseconds 200
 
+        # Some display stacks refuse that legacy mode. Check whether it took;
+        # if not, force it by hand: strip the frame, stretch the window over
+        # the whole screen, and grow the character grid to what fits. The
+        # console paints its own background (black) outside the grid.
+        $mode = 0
+        $native = [CLI.Native]::GetConsoleDisplayMode([ref]$mode) -and $mode -ne 0
+        if (-not $native) {
+            $hwnd = [CLI.Native]::GetConsoleWindow()
+            $style = [CLI.Native]::GetWindowLong($hwnd, -16)
+            $style = $style -band (-bnot 0x00CF0000)   # caption, frame, sysmenu, min/max
+            [CLI.Native]::SetWindowLong($hwnd, -16, $style) | Out-Null
+            try {
+                $maxW = [Console]::LargestWindowWidth
+                $maxH = [Console]::LargestWindowHeight
+                $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
+                $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
+            } catch {}
+            $sw = [CLI.Native]::GetSystemMetrics(0)
+            $sh = [CLI.Native]::GetSystemMetrics(1)
+            # 0x0020 FRAMECHANGED | 0x0040 SHOWWINDOW
+            [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, $sw, $sh, 0x0060) | Out-Null
+            Start-Sleep -Milliseconds 100
+        }
+
         # buffer == window so there are no scrollbars
+        $ws = $Host.UI.RawUI.WindowSize
+        $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
+    } catch {}
+}
+
+# Does the console window actually cover the screen? Used to re-assert
+# fullscreen when the menu is brought back via hotkey/shortcut after
+# something knocked it out of fullscreen. Errs on "yes" so an unreadable
+# rect can never cause a reapply loop.
+function Test-ConsoleFullscreen {
+    try {
+        $r = New-Object CLI.Native+RECT
+        if (-not [CLI.Native]::GetWindowRect([CLI.Native]::GetConsoleWindow(), [ref]$r)) { return $true }
+        $sw = [CLI.Native]::GetSystemMetrics(0)
+        $sh = [CLI.Native]::GetSystemMetrics(1)
+        return ($r.Left -le 0 -and $r.Top -le 0 -and $r.Right -ge $sw -and $r.Bottom -ge $sh)
+    } catch { return $true }
+}
+
+# Undo both fullscreen paths: back to a normal framed window, centered
+# at roughly 80% of the screen.
+function Set-ConsoleWindowed {
+    try {
+        $out = [CLI.Native]::GetStdHandle(-11)
+        $coords = 0
+        [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null   # leave native fullscreen
+        $hwnd = [CLI.Native]::GetConsoleWindow()
+        $style = [CLI.Native]::GetWindowLong($hwnd, -16)
+        [CLI.Native]::SetWindowLong($hwnd, -16, ($style -bor 0x00CF0000)) | Out-Null
+        $sw = [CLI.Native]::GetSystemMetrics(0)
+        $sh = [CLI.Native]::GetSystemMetrics(1)
+        [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero,
+            [int]($sw * 0.1), [int]($sh * 0.1), [int]($sw * 0.8), [int]($sh * 0.8), 0x0060) | Out-Null
+        Start-Sleep -Milliseconds 100
         $ws = $Host.UI.RawUI.WindowSize
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
     } catch {}
@@ -394,6 +463,10 @@ $themes = [ordered]@{
 $themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
 $theme = $themes[$themeName]
 
+# Fullscreen on launch: on by default, toggleable in SETTINGS ("Fullscreen"
+# in settings.json). Turning it off gives a normal centered window.
+$fsEnabled = $settings['Fullscreen'] -ne $false
+
 # Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
 # column 15 and each named tab takes roughly 15-16 columns, so ~8 content
 # tabs plus SETTINGS is what a fullscreen console row actually fits.
@@ -496,6 +569,8 @@ function Get-SettingsItems {
                                     Name = ("Tab $($i + 1): $($tabs[$i].Name)".PadRight(30) + $desc) }
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
+    $list += [pscustomobject]@{ Key = 'Fullscreen'
+                                Name = ('Fullscreen'.PadRight(30) + $(if ($script:fsEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Theme'
                                 Name = ('Color theme'.PadRight(30) + $script:themeName) }
     $list += [pscustomobject]@{ Key = 'Update'
@@ -745,11 +820,26 @@ function Get-PadKey {
 
 # Blocking wait for the next input, whichever device it comes from.
 # Returns a [ConsoleKey], so callers switch on it exactly like .Key.
+$script:wasFg = $true       # we start focused and (if enabled) fullscreen
+$script:fsCheckNext = 0
 function Read-InputKey {
     while ($true) {
         if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
+        # On regaining focus (hotkey/shortcut re-open), make sure we're
+        # still actually fullscreen; if something knocked the window out
+        # of it, force it back. Only on the transition, never repeatedly.
+        if ([Environment]::TickCount -ge $script:fsCheckNext) {
+            $script:fsCheckNext = [Environment]::TickCount + 500
+            $fgNow = ($script:conHwnd -ne [IntPtr]::Zero -and
+                      [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd)
+            if ($fgNow -and -not $script:wasFg -and $script:fsEnabled -and -not (Test-ConsoleFullscreen)) {
+                Set-ConsoleFullscreen
+                Draw-All
+            }
+            $script:wasFg = $fgNow
+        }
         Start-Sleep -Milliseconds 16
     }
 }
@@ -977,7 +1067,7 @@ function Add-TabConfig {
         return
     }
     $choice = Pick-Option 'ADD A TAB' @(
-        'Steam games      - your Steam library, incl. non-Steam shortcuts',
+        'Steam games      - Steam library, incl. non-Steam shortcuts',
         'Shortcuts folder - .lnk shortcuts launched as games/apps',
         'Files folder     - browse and play videos, open any file',
         'Cancel')
@@ -1047,19 +1137,7 @@ function Move-Selection([int]$delta) {
 
 try {
     [Console]::CursorVisible = $false
-    Set-ConsoleFullscreen
-    # Black backdrop just behind the console: conhost fullscreen quantizes
-    # to whole character cells and some (mostly older) graphics stacks leave
-    # stale pixels in the edge strips it should paint black. The helper only
-    # shows itself while the menu is foreground and exits with us.
-    $script:backdropProc = $null
-    $backdropScript = Join-Path $PSScriptRoot 'Backdrop.ps1'
-    if ((Test-Path $backdropScript) -and $script:conHwnd -ne [IntPtr]::Zero) {
-        try {
-            $script:backdropProc = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList `
-                "-NoProfile -ExecutionPolicy Bypass -File `"$backdropScript`" -OwnerPid $PID -ConsoleHwnd $([int64]$script:conHwnd)"
-        } catch {}
-    }
+    if ($script:fsEnabled) { Set-ConsoleFullscreen }
     # Claim the foreground for real: launched from a hotkey or shortcut
     # while another app is focused, a new conhost can be denied focus by
     # Windows - it looks fullscreen but keyboard focus stays behind it.
@@ -1121,6 +1199,12 @@ try {
                     switch ($s.Key) {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
+                        'Fullscreen' {
+                            $script:fsEnabled = -not $script:fsEnabled
+                            $settings['Fullscreen'] = $script:fsEnabled
+                            Save-Settings
+                            if ($script:fsEnabled) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
+                        }
                         'Theme'  {
                             $names = @($themes.Keys)
                             $c = Pick-Option 'COLOR THEME' ($names + @('Cancel'))
@@ -1258,7 +1342,4 @@ try {
     }
 } finally {
     [Console]::CursorVisible = $true
-    if ($script:backdropProc) {
-        try { Stop-Process -Id $script:backdropProc.Id -Force -ErrorAction SilentlyContinue } catch {}
-    }
 }

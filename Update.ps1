@@ -66,7 +66,7 @@ try {
     Copy-Item (Join-Path $root.FullName '*') $here -Recurse -Force
     # A ZIP overlay only adds files; sweep ones old versions shipped under
     # names that have since been renamed away.
-    foreach ($legacy in @('SteamMenu.ps1', 'SteamMenuKey.ahk')) {
+    foreach ($legacy in @('SteamMenu.ps1', 'SteamMenuKey.ahk', 'Backdrop.ps1')) {
         Remove-Item (Join-Path $here $legacy) -Force -ErrorAction SilentlyContinue
     }
     Write-Host "  Updated: v$localVer -> v$remoteVer" -ForegroundColor Green
