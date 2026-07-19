@@ -518,11 +518,15 @@ function Get-FileItems($t) {
     if ($dir -ne $t.Root) {
         $list += [pscustomobject]@{ Name = '..'; Path = (Split-Path $dir -Parent); Type = 'Up' }
     }
+    # Dot-prefixed names (.git, ._macos-droppings, ...) are hidden by
+    # convention even when Windows doesn't flag them hidden - skip them.
     $list += @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+        Where-Object { -not $_.Name.StartsWith('.') } |
         Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
     $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
+        Where-Object { -not $_.Name.StartsWith('.') } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName; Type = 'File' } })
     return $list
 }
@@ -935,7 +939,10 @@ function Get-PickerEntries($dir) {
     } else {
         $list += [pscustomobject]@{ Name = '[ use this folder ]'; Path = $dir; Type = 'Pick' }
         $list += [pscustomobject]@{ Name = '..'; Path = $null; Type = 'Up' }
+        # Get-ChildItem already skips attribute-hidden folders; also skip
+        # dot-prefixed ones (.git, .vscode, ...), hidden by convention.
         $list += @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+            Where-Object { -not $_.Name.StartsWith('.') } |
             ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
     }
     return $list
