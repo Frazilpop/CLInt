@@ -508,6 +508,7 @@ $autoCheck     = $settings['AutoUpdateCheck'] -eq $true
 $inModal = $false        # modals suppress the idle clock/battery repaint
 $batteryPct = -1
 $batteryNext = 0
+$tdpNowW = -1            # live TDP watts (Motion Assistant machines only)
 $statusLast = ''
 $updateNoticeShown = $false
 
@@ -908,16 +909,17 @@ function Draw-GameLine([int]$i) {
 # hidden automatically when the machine reports none.
 function Get-StatusText {
     $parts = @()
+    if ($tdpEnabled -and $script:tdpNowW -gt 0) { $parts += "$($script:tdpNowW)W" }
     if ($script:showClock) { $parts += [DateTime]::Now.ToString('HH:mm') }
     if ($script:showBattery -and $script:batteryPct -ge 0) { $parts += "$($script:batteryPct)%" }
-    return ($parts -join '  ')
+    return ($parts -join ' ')
 }
 function Draw-Status {
     try {
-        if ($W -le 40) { return }
+        if ($W -le 44) { return }
         # top-right corner, on the tab-bar row (which reserves this space)
-        $txt = (Get-StatusText).PadLeft(12)
-        Write-At ($W - 13) 0 $txt $theme.Info
+        $txt = (Get-StatusText).PadLeft(15)
+        Write-At ($W - 16) 0 $txt $theme.Info
         $script:statusLast = $txt
     } catch {}
 }
@@ -949,8 +951,8 @@ function Draw-All {
     # the names themselves so every tab stays visible and nothing can ever
     # write past the row's end (which would wrap or scroll).
     $x = 15
-    # keep clear of the clock/battery in the top-right corner
-    $statusReserve = if (Get-StatusText) { 14 } else { 0 }
+    # keep clear of the TDP/clock/battery in the top-right corner
+    $statusReserve = if (Get-StatusText) { 17 } else { 0 }
     $avail = [Math]::Max(10, $W - $x - 1 - $statusReserve)
     $names = @($tabs | ForEach-Object { [string]$_.Name })
     $nameLen = ($names | ForEach-Object { $_.Length } | Measure-Object -Sum).Sum
@@ -1123,8 +1125,12 @@ function Read-InputKey {
                     try { $b = (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue |
                                 Select-Object -First 1).EstimatedChargeRemaining } catch {}
                     $script:batteryPct = if ($null -ne $b) { [int]$b } else { -1 }
+                    if ($tdpEnabled) {
+                        $script:tdpNowW = -1
+                        try { $t = Get-CurrentTdp; if ($t) { $script:tdpNowW = [int][Math]::Round($t.Stapm) } } catch {}
+                    }
                 }
-                if ((Get-StatusText).PadLeft(14) -ne $script:statusLast) { Draw-Status }
+                if ((Get-StatusText).PadLeft(15) -ne $script:statusLast) { Draw-Status }
             }
         }
         Start-Sleep -Milliseconds 16
@@ -1745,6 +1751,7 @@ try {
                 # bring the menu window back to the front, drop any keys
                 # pressed while the game was running, and redraw
                 try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+                $script:batteryNext = 0   # TDP was restored: refresh the corner readout promptly
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
             }
