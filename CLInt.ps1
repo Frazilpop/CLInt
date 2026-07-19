@@ -103,9 +103,44 @@ function Get-NonSteamGames {
     return @($found | Sort-Object Name)
 }
 
+# Steam collections (the library's groupings) live in per-account
+# cloudstorage JSON: entries keyed "user-collections.<id>" whose value is
+# itself stringified JSON with id, name, and the member appids in 'added'.
+# Deleted collections are flagged; dynamic (filter-based) ones can't be
+# evaluated offline and are skipped.
+$script:steamCols = $null
+function Get-SteamCollections {
+    if ($null -ne $script:steamCols) { return $script:steamCols }
+    $cols = @{}
+    try {
+        $steam = Get-SteamPath
+        foreach ($f in (Get-ChildItem (Join-Path $steam 'userdata\*\config\cloudstorage\cloud-storage-namespace-*.json') -ErrorAction SilentlyContinue)) {
+            try {
+                foreach ($e in (Get-Content $f.FullName -Raw | ConvertFrom-Json)) {
+                    $key = if ($e -is [array]) { [string]$e[0] } else { [string]$e.key }
+                    if ($key -notlike 'user-collections.*') { continue }
+                    $rec = if ($e -is [array]) { $e[1] } else { $e }
+                    if ($rec.is_deleted -or -not $rec.value) { continue }
+                    $v = $rec.value | ConvertFrom-Json
+                    if (-not $v.name -or $null -ne $v.filterSpec) { continue }
+                    $cols[[string]$v.id] = [pscustomobject]@{
+                        Id    = [string]$v.id
+                        Name  = [string]$v.name
+                        Added = @(@($v.added) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+                    }
+                }
+            } catch {}
+        }
+    } catch {}
+    $script:steamCols = @($cols.Values | Sort-Object Name)
+    return $script:steamCols
+}
+
 # ----------------------------------------------------------- Settings ---
 # settings.json holds the tab configuration: an array of
-#   { "Type": "Steam" }                          - the Steam library
+#   { "Type": "Steam" }                          - the whole Steam library
+#   { "Type": "Steam", "Collection": "<name>",
+#     "CollectionId": "<id>" }                   - one Steam collection only
 #   { "Type": "Shortcuts", "Path": "..." }       - .lnk shortcuts in a folder
 #   { "Type": "Files",     "Path": "..." }       - file browser (videos via VLC)
 # in display order; a SETTINGS tab is always appended. Optional per-tab
@@ -630,14 +665,27 @@ function New-TabState($cfg) {
     $t = @{ Type = $cfg.Type; Path = $cfg.Path; Sel = 0; Off = 0 }
     $t.Name = if ($cfg.Name) { $cfg.Name } else {
         switch ($cfg.Type) {
-            'Steam'     { 'STEAM GAMES' }
+            'Steam'     { if ($cfg.Collection) { ([string]$cfg.Collection).ToUpper() } else { 'STEAM GAMES' } }
             'Shortcuts' { if ($cfg.Path) { (Split-Path $cfg.Path -Leaf).ToUpper() } else { 'SHORTCUTS' } }
             'Files'     { if ($cfg.Path) { (Split-Path $cfg.Path -Leaf).ToUpper() } else { 'FILES' } }
             'Settings'  { 'SETTINGS' }
         }
     }
     switch ($cfg.Type) {
-        'Steam'     { $t.Items = $games }
+        'Steam'     {
+            if ($cfg.CollectionId) {
+                $col = @(Get-SteamCollections) | Where-Object { $_.Id -eq [string]$cfg.CollectionId } | Select-Object -First 1
+                if ($col) {
+                    $inCol = @{}
+                    foreach ($a in $col.Added) { $inCol[$a] = $true }
+                    $t.Items = @($games | Where-Object { $inCol[[string]$_.AppId] })
+                } else {
+                    $t.Items = @()   # collection no longer exists in Steam
+                }
+            } else {
+                $t.Items = $games
+            }
+        }
         'Shortcuts' {
             $t.Items = @(Get-ShortcutGames $cfg.Path)
             Add-MaProfileTags $t.Items
@@ -691,7 +739,7 @@ function Get-SettingsItems {
     for ($i = 0; $i -lt $settings['Tabs'].Count; $i++) {
         $cfg = $settings['Tabs'][$i]
         $desc = switch ($cfg.Type) {
-            'Steam'     { 'Steam library' }
+            'Steam'     { if ($cfg.Collection) { "Steam collection: $($cfg.Collection)" } else { 'Steam library' } }
             'Shortcuts' { "shortcuts in $($cfg.Path)" }
             'Files'     { "files in $($cfg.Path)" }
         }
@@ -1145,7 +1193,8 @@ function Read-TextInput([string]$title, [string]$current) {
 function Edit-TabConfig([int]$i) {
     $cfg = $settings['Tabs'][$i]
     $opts = @()
-    if ($cfg.Type -ne 'Steam') { $opts += 'Change folder' }
+    if ($cfg.Type -eq 'Steam') { $opts += 'Change collection' }
+    else                       { $opts += 'Change folder' }
     $opts += @('Rename tab', 'Change icon', 'Move left', 'Move right', 'Remove tab', 'Cancel')
     $choice = Pick-Option "TAB $($i + 1): $($tabs[$i].Name)" $opts
     if ($choice -lt 0) { return }
@@ -1153,6 +1202,18 @@ function Edit-TabConfig([int]$i) {
         'Change folder' {
             $p = Pick-Folder "new folder for this tab" $cfg.Path
             if ($p) { $cfg.Path = $p; $cfg.Remove('Name') }   # re-derive the title
+        }
+        'Change collection' {
+            $cols = @(Get-SteamCollections)
+            $names = @('Whole library') + @($cols | ForEach-Object { "$($_.Name)  ($(@($_.Added).Count) games)" })
+            $c = Pick-Option "TAB $($i + 1)  --  WHICH STEAM GAMES?" ($names + @('Cancel'))
+            if ($c -eq 0) {
+                $cfg.Remove('Collection'); $cfg.Remove('CollectionId'); $cfg.Remove('Name')
+            } elseif ($c -gt 0 -and $c -le $cols.Count) {
+                $col = $cols[$c - 1]
+                $cfg.Collection = $col.Name; $cfg.CollectionId = $col.Id
+                $cfg.Remove('Name')   # re-derive the title from the collection
+            }
         }
         'Rename tab' {
             # Prefill with the current title (auto-derived or custom), so
@@ -1202,12 +1263,27 @@ function Add-TabConfig {
         'Cancel')
     switch ($choice) {
         0 {
-            $settings['Tabs'] += @{ Type = 'Steam' }
             if ($games.Count -eq 0) {
                 try { $script:games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name) } catch {}
                 Add-MaProfileTags $games
             }
-            Apply-TabConfig
+            $newTab = @{ Type = 'Steam' }
+            $proceed = $true
+            $cols = @(Get-SteamCollections)
+            if ($cols.Count -gt 0) {
+                $names = @('Whole library') + @($cols | ForEach-Object { "$($_.Name)  ($(@($_.Added).Count) games)" })
+                $c = Pick-Option 'STEAM TAB  --  WHICH GAMES?' ($names + @('Cancel'))
+                if ($c -lt 0 -or $c -ge $names.Count) { $proceed = $false }
+                elseif ($c -gt 0) {
+                    $col = $cols[$c - 1]
+                    $newTab.Collection = $col.Name
+                    $newTab.CollectionId = $col.Id
+                }
+            }
+            if ($proceed) {
+                $settings['Tabs'] += $newTab
+                Apply-TabConfig
+            }
         }
         1 {
             $p = Pick-Folder 'folder with .lnk shortcuts' ([Environment]::GetFolderPath('Desktop'))
