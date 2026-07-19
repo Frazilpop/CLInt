@@ -301,223 +301,57 @@ public struct CONSOLE_FONT_INFOEX {
 }
 [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
 public static extern bool SetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
-[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-public static extern bool GetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int coords);
-[DllImport("kernel32.dll")] public static extern bool GetConsoleDisplayMode(out uint mode);
-[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
-[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int idx, int val);
-[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
-[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr wp, IntPtr lp);
 '@
 } catch {}
 
-# Poll for conhost's fullscreen mode to engage - the toggle is not
-# instantaneous, especially via the message path.
-function Wait-FullscreenMode([int]$timeoutMs) {
-    $deadline = [Environment]::TickCount + $timeoutMs
-    do {
-        $m = 0
-        if ([CLI.Native]::GetConsoleDisplayMode([ref]$m) -and $m -ne 0) { return $true }
-        Start-Sleep -Milliseconds 100
-    } while ([Environment]::TickCount -lt $deadline)
-    return $false
-}
-
-# One font size per device, decided once and used in BOTH windowed and
-# fullscreen so the text never changes size between modes. Chosen as the
-# largest Consolas whose measured cells divide the panel closest to
-# exactly (1920x1080 fits 24px cells at 160x45; 1280x720 fits 20px at
-# 128x36) - a perfectly-divided grid also leaves no uncovered strips for
-# the manual fullscreen fallback.
-$script:conFontSize = 0
-function Set-ConsoleFont {
+# Deliberately simple: set a readable font, ask conhost for its native
+# fullscreen (the same mode Alt+Enter toggles), make buffer == window.
+# On devices where the API is refused the window just stays as it is -
+# Alt+Enter by hand still works there, and the elaborate programmatic
+# fallbacks we tried caused more trouble than the gap they closed.
+function Set-ConsoleFullscreen {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
         $font = New-Object CLI.Native+CONSOLE_FONT_INFOEX
         $font.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($font)
-        $font.FontFamily = 54; $font.FontWeight = 400
+        $font.SizeY = 28; $font.FontFamily = 54; $font.FontWeight = 400
         $font.FaceName = 'Consolas'
-        if (-not $script:conFontSize) {
-            $sw = [CLI.Native]::GetSystemMetrics(0)
-            $sh = [CLI.Native]::GetSystemMetrics(1)
-            $best = 28
-            $bestScore = [int]::MaxValue
-            foreach ($fs in 28, 26, 24, 22, 20, 18, 16) {
-                $font.SizeX = 0; $font.SizeY = $fs
-                [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
-                $cur = New-Object CLI.Native+CONSOLE_FONT_INFOEX
-                $cur.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($cur)
-                if (-not [CLI.Native]::GetCurrentConsoleFontEx($out, $false, [ref]$cur) -or $cur.SizeX -le 0) { continue }
-                $score = [Math]::Max($sw % $cur.SizeX, $sh % $cur.SizeY)
-                if ($score -lt $bestScore) { $bestScore = $score; $best = $fs }
-                if ($score -le 2) { break }   # candidates run largest-first: first great fit wins
-            }
-            $script:conFontSize = $best
-        }
-        $font.SizeX = 0; $font.SizeY = $script:conFontSize
         [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
-    } catch {}
-}
 
-function Set-ConsoleFullscreen {
-    try {
-        $out = [CLI.Native]::GetStdHandle(-11)
-        Set-ConsoleFont
-
-        # Rung 1: the direct API behind Alt+Enter. Works on some devices
-        # (the 1080p GPD), refused on others (a 720p machine) even though
-        # conhost's own Alt+Enter works fine there.
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
-        $native = Wait-FullscreenMode 600
-        $hwnd = [CLI.Native]::GetConsoleWindow()
+        Start-Sleep -Milliseconds 200
 
-        # Rung 2: Alt+Enter as a window message, posted straight to the
-        # console window - the same toggle the physical keys trigger, no
-        # focus required and nothing to leak into other apps.
-        if (-not $native) {
-            [CLI.Native]::PostMessage($hwnd, 0x0104, [IntPtr]0x0D, [IntPtr][int64]0x20000001) | Out-Null   # WM_SYSKEYDOWN Enter, Alt held
-            [CLI.Native]::PostMessage($hwnd, 0x0105, [IntPtr]0x0D, [IntPtr][int64]0xE0000001) | Out-Null   # WM_SYSKEYUP
-            $native = Wait-FullscreenMode 1200
-        }
-
-        # Rung 3: synthesized keystrokes, only into our own focused window.
-        if (-not $native) {
-            [CLI.Native]::SetForegroundWindow($hwnd) | Out-Null
-            Start-Sleep -Milliseconds 150
-            if ([CLI.Native]::GetForegroundWindow() -eq $hwnd) {
-                [CLI.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
-                [CLI.Native]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)   # Enter down
-                [CLI.Native]::keybd_event(0x0D, 0, 2, [UIntPtr]::Zero)   # Enter up
-                [CLI.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
-                $native = Wait-FullscreenMode 1200
-            }
-        }
-
-        # Native mode engaged: re-grow the grid (a previous windowed spell
-        # shrinks it, and conhost keeps whatever grid it had).
-        if ($native) {
-            try {
-                $maxW = [Console]::LargestWindowWidth
-                $maxH = [Console]::LargestWindowHeight
-                $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
-                $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
-            } catch {}
-        }
-
-        # Rung 4: force it by hand - strip the frame, grow the grid to what
-        # fits (the panel-fit font means it divides the screen exactly or
-        # nearly so), stretch the window, and pin it back to the origin
-        # after conhost's cell-snap has settled.
-        if (-not $native) {
-            $style = [CLI.Native]::GetWindowLong($hwnd, -16)
-            $style = $style -band (-bnot 0x00CF0000)   # caption, frame, sysmenu, min/max
-            [CLI.Native]::SetWindowLong($hwnd, -16, $style) | Out-Null
-            try {
-                $maxW = [Console]::LargestWindowWidth
-                $maxH = [Console]::LargestWindowHeight
-                $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
-                $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
-            } catch {}
-            $sw = [CLI.Native]::GetSystemMetrics(0)
-            $sh = [CLI.Native]::GetSystemMetrics(1)
-            # 0x0020 FRAMECHANGED | 0x0040 SHOWWINDOW
-            [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, $sw, $sh, 0x0060) | Out-Null
-            Start-Sleep -Milliseconds 150
-            # conhost may have re-snapped the size; force the position again
-            # (0x0001 SWP_NOSIZE | 0x0010 SWP_NOACTIVATE)
-            [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, 0x0071) | Out-Null
-        }
-
+        # re-grow the grid (a windowed spell shrinks it), then
         # buffer == window so there are no scrollbars
+        try {
+            $maxW = [Console]::LargestWindowWidth
+            $maxH = [Console]::LargestWindowHeight
+            $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
+            $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
+        } catch {}
         $ws = $Host.UI.RawUI.WindowSize
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
-
-        # The shell only hides the taskbar for windows it detects as exactly
-        # fullscreen; a cell-snapped manual window misses by a few pixels,
-        # so it goes topmost instead (dropped while content is running).
-        $script:fsForced = -not $native
         $script:isFullscreen = $true
-        Set-MenuTopmost $script:fsForced
-
-        # Still not covering the screen? Leave a breadcrumb for debugging.
-        if (-not (Test-ConsoleFullscreen)) {
-            try {
-                $r = New-Object CLI.Native+RECT
-                [CLI.Native]::GetWindowRect($hwnd, [ref]$r) | Out-Null
-                $m2 = 0; [CLI.Native]::GetConsoleDisplayMode([ref]$m2) | Out-Null
-                "$(Get-Date -Format s)  fullscreen incomplete: mode=$m2 native=$native font=$($script:conFontSize) rect=$($r.Left),$($r.Top),$($r.Right),$($r.Bottom) screen=$([CLI.Native]::GetSystemMetrics(0))x$([CLI.Native]::GetSystemMetrics(1)) cols=$([Console]::WindowWidth) rows=$([Console]::WindowHeight)" |
-                    Add-Content (Join-Path $PSScriptRoot 'error.log')
-            } catch {}
-        }
     } catch {}
 }
 
-# Keep the menu above the taskbar (manual fullscreen) or release it
-# (windowed / while games and videos run).
-function Set-MenuTopmost([bool]$on) {
-    try {
-        $hwnd = [CLI.Native]::GetConsoleWindow()
-        $after = if ($on) { [IntPtr](-1) } else { [IntPtr](-2) }   # HWND_TOPMOST / HWND_NOTOPMOST
-        # 0x0001 NOSIZE | 0x0002 NOMOVE | 0x0010 NOACTIVATE
-        [CLI.Native]::SetWindowPos($hwnd, $after, 0, 0, 0, 0, 0x0013) | Out-Null
-    } catch {}
-}
-
-# Does the console window actually cover the screen? Used to re-assert
-# fullscreen when the menu is brought back via hotkey/shortcut after
-# something knocked it out of fullscreen. Errs on "yes" so an unreadable
-# rect can never cause a reapply loop.
-function Test-ConsoleFullscreen {
-    try {
-        $r = New-Object CLI.Native+RECT
-        if (-not [CLI.Native]::GetWindowRect([CLI.Native]::GetConsoleWindow(), [ref]$r)) { return $true }
-        $sw = [CLI.Native]::GetSystemMetrics(0)
-        $sh = [CLI.Native]::GetSystemMetrics(1)
-        return ($r.Left -le 0 -and $r.Top -le 0 -and $r.Right -ge $sw -and $r.Bottom -ge $sh)
-    } catch { return $true }
-}
-
-# Undo both fullscreen paths: back to a normal framed window, centered
-# at roughly 80% of the screen.
+# Leave fullscreen: back to a plain window. Shrinking the GRID is what
+# actually shrinks a conhost window - its size is dictated by the grid.
 function Set-ConsoleWindowed {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
-        [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null   # leave native fullscreen
-        Set-ConsoleFont   # same size as fullscreen - the text never changes size
-        Set-MenuTopmost $false
-        $hwnd = [CLI.Native]::GetConsoleWindow()
-        # Conhost's window size is dictated by the character grid - shrink
-        # the GRID or the window snaps straight back to screen size and the
-        # toggle appears to do nothing.
+        [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null
         try {
             $cols = [Math]::Max(80, [int]([Console]::WindowWidth  * 0.75))
             $rows = [Math]::Max(25, [int]([Console]::WindowHeight * 0.75))
             $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
         } catch {}
-        $style = [CLI.Native]::GetWindowLong($hwnd, -16)
-        [CLI.Native]::SetWindowLong($hwnd, -16, ($style -bor 0x00CF0000)) | Out-Null
-        $sw = [CLI.Native]::GetSystemMetrics(0)
-        $sh = [CLI.Native]::GetSystemMetrics(1)
-        # position only - the grid owns the size (0x0001 NOSIZE | 0x0020 FRAMECHANGED | 0x0040 SHOWWINDOW)
-        [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero,
-            [int]($sw * 0.08), [int]($sh * 0.08), 0, 0, 0x0061) | Out-Null
-        Start-Sleep -Milliseconds 100
-        $ws = $Host.UI.RawUI.WindowSize
-        $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
         $script:isFullscreen = $false
-        $script:fsForced = $false
     } catch {}
 }
 
@@ -630,7 +464,6 @@ $theme = $themes[$themeName]
 # in settings.json). Turning it off gives a normal centered window.
 $fsEnabled = $settings['Fullscreen'] -ne $false
 $isFullscreen = $false   # what the window IS right now (owned by the Set-Console* functions)
-$fsForced = $false       # manual borderless path in use (window is topmost)
 
 # Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
 # column 15 and each named tab takes roughly 15-16 columns, so ~8 content
@@ -752,6 +585,7 @@ function Get-SettingsItems {
                                 Name = ('Color theme'.PadRight(30) + $script:themeName) }
     $list += [pscustomobject]@{ Key = 'Update'
                                 Name = ('Check for updates'.PadRight(30) + "current: v$appVersion") }
+    $list += [pscustomobject]@{ Key = 'Quit'; Name = '[ quit CLInt ]' }
     return $list
 }
 
@@ -997,26 +831,11 @@ function Get-PadKey {
 
 # Blocking wait for the next input, whichever device it comes from.
 # Returns a [ConsoleKey], so callers switch on it exactly like .Key.
-$script:wasFg = $true       # we start focused and (if enabled) fullscreen
-$script:fsCheckNext = 0
 function Read-InputKey {
     while ($true) {
         if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
-        # On regaining focus (hotkey/shortcut re-open), make sure we're
-        # still actually fullscreen; if something knocked the window out
-        # of it, force it back. Only on the transition, never repeatedly.
-        if ([Environment]::TickCount -ge $script:fsCheckNext) {
-            $script:fsCheckNext = [Environment]::TickCount + 500
-            $fgNow = ($script:conHwnd -ne [IntPtr]::Zero -and
-                      [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd)
-            if ($fgNow -and -not $script:wasFg -and $script:fsEnabled -and -not (Test-ConsoleFullscreen)) {
-                Set-ConsoleFullscreen
-                Draw-All
-            }
-            $script:wasFg = $fgNow
-        }
         Start-Sleep -Milliseconds 16
     }
 }
@@ -1405,6 +1224,7 @@ try {
                     switch ($s.Key) {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
+                        'Quit'   { Clear-Host; exit 0 }
                         'Fullscreen' {
                             # Stateless button: flip what the window IS right
                             # now; the result persists for the next launch.
@@ -1466,7 +1286,6 @@ try {
                     Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor $theme.Accent
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
-                    if ($script:fsForced) { Set-MenuTopmost $false }   # let the player on top
                     if ($isVideo -and (Test-Path $vlcExe)) {
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
@@ -1475,7 +1294,6 @@ try {
                         Start-Sleep -Seconds 5
                     }
                     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
-                    if ($script:fsForced -and $script:isFullscreen) { Set-MenuTopmost $true }
                     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                     Draw-All
                     break
@@ -1504,7 +1322,6 @@ try {
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
                     Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
-                if ($script:fsForced) { Set-MenuTopmost $false }   # let the game on top
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
                 Wait-ForGameExit $g
@@ -1512,7 +1329,6 @@ try {
                 # bring the menu window back to the front, drop any keys
                 # pressed while the game was running, and redraw
                 try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
-                if ($script:fsForced -and $script:isFullscreen) { Set-MenuTopmost $true }
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
             }
