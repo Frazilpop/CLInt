@@ -332,14 +332,23 @@ function Hide-Scrollbars {
 # On devices where the API is refused the window just stays as it is -
 # Alt+Enter by hand still works there, and the elaborate programmatic
 # fallbacks we tried caused more trouble than the gap they closed.
-function Set-ConsoleFullscreen {
+# Apply the user's chosen text size (see $textSizes / the SETTINGS entry).
+function Set-ConsoleFontSize {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
         $font = New-Object CLI.Native+CONSOLE_FONT_INFOEX
         $font.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($font)
-        $font.SizeY = 28; $font.FontFamily = 54; $font.FontWeight = 400
+        $font.SizeY = [int]$textSizes[$script:textSizeName]
+        $font.FontFamily = 54; $font.FontWeight = 400
         $font.FaceName = 'Consolas'
         [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
+    } catch {}
+}
+
+function Set-ConsoleFullscreen {
+    try {
+        $out = [CLI.Native]::GetStdHandle(-11)
+        Set-ConsoleFontSize
 
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
@@ -367,6 +376,7 @@ function Set-ConsoleWindowed {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null
+        Set-ConsoleFontSize
         try {
             $cols = [Math]::Max(80, [int]([Console]::WindowWidth  * 0.75))
             $rows = [Math]::Max(25, [int]([Console]::WindowHeight * 0.75))
@@ -482,6 +492,12 @@ $themes = [ordered]@{
 }
 $themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
 $theme = $themes[$themeName]
+
+# Text size (SETTINGS): font heights in scaled pixels, so the visual size
+# follows the user's display scale like every other app. Medium is the
+# 28px the app has always used.
+$textSizes = [ordered]@{ small = 20; medium = 28; large = 34 }
+$textSizeName = if ($settings['TextSize'] -and $textSizes.Contains([string]$settings['TextSize'])) { [string]$settings['TextSize'] } else { 'medium' }
 
 $isFullscreen = $false   # what the window IS right now (owned by the Set-Console* functions)
 
@@ -601,6 +617,8 @@ function Get-SettingsItems {
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
     $list += [pscustomobject]@{ Key = 'Fullscreen'; Name = 'Toggle fullscreen' }
+    $list += [pscustomobject]@{ Key = 'TextSize'
+                                Name = ('Text size'.PadRight(30) + $script:textSizeName) }
     $list += [pscustomobject]@{ Key = 'Theme'
                                 Name = ('Color theme'.PadRight(30) + $script:themeName) }
     $list += [pscustomobject]@{ Key = 'Update'
@@ -1290,6 +1308,19 @@ try {
                             # Session-only: nothing is persisted, so the next
                             # launch always starts fullscreen again.
                             if ($script:isFullscreen) { Set-ConsoleWindowed } else { Set-ConsoleFullscreen }
+                        }
+                        'TextSize' {
+                            $names = @($textSizes.Keys)
+                            $c = Pick-Option 'TEXT SIZE' ($names + @('Cancel'))
+                            if ($c -ge 0 -and $c -lt $names.Count) {
+                                $script:textSizeName = $names[$c]
+                                $settings['TextSize'] = $script:textSizeName
+                                Save-Settings
+                                Set-ConsoleFontSize
+                                # cell size changed: re-fit the grid to the screen
+                                if ($script:isFullscreen) { Set-ConsoleFullscreen }
+                                Hide-Scrollbars
+                            }
                         }
                         'Theme'  {
                             $names = @($themes.Keys)
