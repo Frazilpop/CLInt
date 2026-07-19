@@ -535,6 +535,59 @@ function Record-Play($game, [double]$mins) {
     }
     Save-RecentMap
 }
+# Video history (Files tabs): play counts tracked here per machine, and
+# partially-watched positions read straight from VLC's own resume state,
+# so the [>>] tag shows the real continue-from timestamp.
+$videoHistEnabled = $settings['VideoHistory'] -ne $false
+$watchFile = Join-Path $PSScriptRoot 'watch-history.json'
+$watchMap = @{}
+if (Test-Path $watchFile) {
+    try {
+        (Get-Content $watchFile -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $watchMap[$_.Name] = $_.Value }
+    } catch {}
+}
+function Save-WatchMap {
+    try { [pscustomobject]$script:watchMap | ConvertTo-Json | Set-Content $script:watchFile -Encoding utf8 } catch {}
+}
+function Record-VideoPlay([string]$path) {
+    $k = $path.ToLower()
+    $prev = 0
+    if ($script:watchMap[$k]) { try { $prev = [int]$script:watchMap[$k].Plays } catch {} }
+    $script:watchMap[$k] = [pscustomobject]@{ Plays = $prev + 1; Last = [DateTime]::Now.ToString('s') }
+    Save-WatchMap
+}
+# VLC stores resume positions in [RecentsMRL] of vlc-qt-interface.ini:
+# parallel 'list=' (file:/// URIs) and 'times=' (milliseconds; 0 = none).
+function Get-VlcResumeSeconds {
+    $map = @{}
+    try {
+        $ini = Join-Path $env:APPDATA 'vlc\vlc-qt-interface.ini'
+        if (-not (Test-Path $ini)) { return $map }
+        $inSect = $false; $list = $null; $times = $null
+        foreach ($ln in (Get-Content $ini)) {
+            if ($ln -match '^\[') { $inSect = ($ln.Trim() -eq '[RecentsMRL]'); continue }
+            if (-not $inSect) { continue }
+            if ($ln -like 'list=*')  { $list  = $ln.Substring(5) }
+            elseif ($ln -like 'times=*') { $times = $ln.Substring(6) }
+        }
+        if ($list -and $times) {
+            $files = @($list -split ',\s*')
+            $ts    = @($times -split ',\s*')
+            for ($i = 0; $i -lt [Math]::Min($files.Count, $ts.Count); $i++) {
+                $u = $files[$i].Trim()
+                if ($u -notlike 'file:///*') { continue }
+                $p = ([Uri]::UnescapeDataString($u.Substring(8))) -replace '/', '\'
+                $ms = [long]0
+                if ([long]::TryParse($ts[$i].Trim(), [ref]$ms) -and $ms -gt 0) {
+                    $map[$p.ToLower()] = [int]($ms / 1000)
+                }
+            }
+        }
+    } catch {}
+    return $map
+}
+
 # Recently played games first (most recent at the top); everything else
 # keeps its alphabetical order. No-op while the feature is off.
 function Sort-Games($list) {
@@ -575,9 +628,20 @@ function Get-FileItems($t) {
         Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
+    $vlcResume = if ($script:videoHistEnabled) { Get-VlcResumeSeconds } else { @{} }
     $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
         Where-Object { -not $_.Name.StartsWith('.') } |
-        ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName; Type = 'File' } })
+        ForEach-Object {
+            $k = $_.FullName.ToLower()
+            $plays = 0
+            if ($script:videoHistEnabled -and $script:watchMap[$k]) {
+                try { $plays = [int]$script:watchMap[$k].Plays } catch {}
+            }
+            [pscustomobject]@{
+                Name = $_.Name; Path = $_.FullName; Type = 'File'
+                Plays = $plays; Resume = $vlcResume[$k]
+            }
+        })
     return $list
 }
 
@@ -678,6 +742,8 @@ function Get-SettingsItems {
                                 Name = ('Show battery'.PadRight(30) + $(if ($script:showBattery) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Recent'
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'VideoHist'
+                                Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'AutoCheck'
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'TextSize'
@@ -798,6 +864,13 @@ function Draw-GameLine([int]$i) {
                 if ($m -ge 60) { $label += "  [$([int]($m / 60))h]" }
             }
         }
+    } elseif ($type -eq 'Files' -and $items[$i].Type -eq 'File' -and $script:videoHistEnabled) {
+        if ($items[$i].Resume) {
+            $ts = [TimeSpan]::FromSeconds([double]$items[$i].Resume)
+            $pos = if ($ts.Hours -gt 0) { $ts.ToString('h\:mm\:ss') } else { $ts.ToString('m\:ss') }
+            $label += "  [>> $pos]"
+        }
+        if ($items[$i].Plays -ge 1) { $label += "  [x$($items[$i].Plays)]" }
     }
     if ($i -eq $selected) {
         Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) $theme.SelFg $theme.Accent
@@ -1474,6 +1547,12 @@ try {
                             $settings['AutoUpdateCheck'] = $script:autoCheck
                             Save-Settings
                         }
+                        'VideoHist' {
+                            $script:videoHistEnabled = -not $script:videoHistEnabled
+                            $settings['VideoHistory'] = $script:videoHistEnabled
+                            Save-Settings
+                            Build-Tabs   # rebuild file tabs with/without tags
+                        }
                         'TextSize' {
                             $names = @($textSizes.Keys)
                             $c = Pick-Option 'TEXT SIZE' ($names + @('Cancel'))
@@ -1540,6 +1619,7 @@ try {
                     Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor $theme.Accent
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
+                    if ($script:videoHistEnabled -and $isVideo) { Record-VideoPlay $v.Path }
                     if ($isVideo -and (Test-Path $vlcExe)) {
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
@@ -1548,6 +1628,13 @@ try {
                         Start-Sleep -Seconds 5
                     }
                     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+                    if ($script:videoHistEnabled) {
+                        # refresh tags: VLC has just written its resume state
+                        $keep = $selected
+                        $cur.Items = @(Get-FileItems $cur)
+                        $script:items = $cur.Items
+                        $script:selected = [Math]::Min($keep, [Math]::Max(0, $items.Count - 1))
+                    }
                     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                     Draw-All
                     break
