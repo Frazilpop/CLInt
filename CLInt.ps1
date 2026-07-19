@@ -662,6 +662,14 @@ function Pad([string]$s, [int]$width) {
 function Get-Layout {
     $script:W = [Console]::WindowWidth
     $script:H = [Console]::WindowHeight
+    # No scrollbars, ever: conhost shows them whenever the buffer outgrows
+    # the window (any resize does it - a game switching resolution, a drag
+    # of the windowed frame), so re-pin buffer == window on every layout.
+    try {
+        if ([Console]::BufferWidth -ne $W -or [Console]::BufferHeight -ne $H) {
+            $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($W, $H)
+        }
+    } catch {}
     $script:listTop  = 7                       # header block height (6-row logos + gap)
     $script:visible  = [Math]::Max(1, $H - $listTop - 1)
 }
@@ -707,13 +715,29 @@ function Draw-All {
     for ($i = 0; $i -lt $logo.Count; $i++) {
         Write-At 2 $i $logo[$i] $theme.Logo
     }
+    # Tab bar: fit ALL tabs on the row. Tighten padding first, then trim
+    # the names themselves so every tab stays visible and nothing can ever
+    # write past the row's end (which would wrap or scroll).
     $x = 15
+    $avail = [Math]::Max(10, $W - $x - 1)
+    $names = @($tabs | ForEach-Object { [string]$_.Name })
+    $nameLen = ($names | ForEach-Object { $_.Length } | Measure-Object -Sum).Sum
+    $padLen = 2; $gap = 2
+    if ($nameLen + $names.Count * 2 * $padLen + ($names.Count - 1) * $gap -gt $avail) { $padLen = 1; $gap = 1 }
+    if ($nameLen + $names.Count * 2 * $padLen + ($names.Count - 1) * $gap -gt $avail) {
+        $budget = $avail - $names.Count * 2 * $padLen - ($names.Count - 1) * $gap
+        $maxLen = [Math]::Max(2, [int][Math]::Floor($budget / $names.Count))
+        $names = @($names | ForEach-Object {
+            if ($_.Length -gt $maxLen) { $_.Substring(0, [Math]::Max(1, $maxLen - 1)) + '~' } else { $_ }
+        })
+    }
+    $padStr = ' ' * $padLen
     for ($t = 0; $t -lt $tabs.Count; $t++) {
-        $txt = "  $($tabs[$t].Name)  "
-        if ($x + $txt.Length -ge $W) { break }   # more tabs than fit: clip the bar
+        $txt = $padStr + $names[$t] + $padStr
+        if ($x + $txt.Length -ge $W) { break }   # belt and braces
         if ($t -eq $tab) { Write-At $x 0 $txt $theme.SelFg $theme.Accent }
         else             { Write-At $x 0 $txt $theme.Hint }
-        $x += $txt.Length + 2
+        $x += $txt.Length + $gap
     }
     $count = switch ($cur.Type) {
         'Steam'     { "$($items.Count) Steam games installed" }
