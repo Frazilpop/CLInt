@@ -168,6 +168,10 @@ if (-not $settings.ContainsKey('Tabs')) {
     )
 }
 $settings.Remove('LocalShortcutDir'); $settings.Remove('VideoRoot')
+# 'Fullscreen' was once persisted by the toggle; a stored 'false' made
+# every launch start windowed (and skip the font setup). Launches always
+# go fullscreen now - the SETTINGS button toggles the session only.
+$settings.Remove('Fullscreen')
 # JSON round-trips tab entries as PSCustomObjects; normalize to hashtables.
 $settings['Tabs'] = @($settings['Tabs'] | ForEach-Object {
     if ($_ -is [hashtable]) { $_ }
@@ -460,9 +464,6 @@ $themes = [ordered]@{
 $themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
 $theme = $themes[$themeName]
 
-# Fullscreen on launch: on by default, toggleable in SETTINGS ("Fullscreen"
-# in settings.json). Turning it off gives a normal centered window.
-$fsEnabled = $settings['Fullscreen'] -ne $false
 $isFullscreen = $false   # what the window IS right now (owned by the Set-Console* functions)
 
 # Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
@@ -1193,7 +1194,7 @@ try {
         try { [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null } catch {}
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
-    if ($script:fsEnabled) { Set-ConsoleFullscreen }
+    Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
     Draw-All
     # Drop any keypress still buffered from launching the shortcut (e.g. the
     # Enter that opened it), otherwise it instantly launches the first game.
@@ -1250,12 +1251,9 @@ try {
                         'AddTab' { Add-TabConfig }
                         'Quit'   { Clear-Host; exit 0 }
                         'Fullscreen' {
-                            # Stateless button: flip what the window IS right
-                            # now; the result persists for the next launch.
-                            if ($script:isFullscreen) { $script:fsEnabled = $false; Set-ConsoleWindowed }
-                            else                      { $script:fsEnabled = $true;  Set-ConsoleFullscreen }
-                            $settings['Fullscreen'] = $script:fsEnabled
-                            Save-Settings
+                            # Session-only: nothing is persisted, so the next
+                            # launch always starts fullscreen again.
+                            if ($script:isFullscreen) { Set-ConsoleWindowed } else { Set-ConsoleFullscreen }
                         }
                         'Theme'  {
                             $names = @($themes.Keys)
