@@ -265,6 +265,8 @@ public struct CONSOLE_FONT_INFOEX {
 }
 [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
 public static extern bool SetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern bool GetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int coords);
 [DllImport("kernel32.dll")] public static extern bool GetConsoleDisplayMode(out uint mode);
@@ -275,6 +277,9 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
 [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 '@
 } catch {}
 
@@ -301,6 +306,46 @@ function Set-ConsoleFullscreen {
         $mode = 0
         $native = [CLI.Native]::GetConsoleDisplayMode([ref]$mode) -and $mode -ne 0
         if (-not $native) {
+            # The direct API call is refused on some devices where conhost's
+            # own Alt+Enter works fine (confirmed on a 720p machine). So do
+            # exactly what the keyboard does: synthesize Alt+Enter - but only
+            # into our own window, and only once it truly holds focus.
+            $hwnd = [CLI.Native]::GetConsoleWindow()
+            [CLI.Native]::SetForegroundWindow($hwnd) | Out-Null
+            Start-Sleep -Milliseconds 150
+            if ([CLI.Native]::GetForegroundWindow() -eq $hwnd) {
+                [CLI.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
+                [CLI.Native]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)   # Enter down
+                [CLI.Native]::keybd_event(0x0D, 0, 2, [UIntPtr]::Zero)   # Enter up
+                [CLI.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
+                Start-Sleep -Milliseconds 350
+                $mode = 0
+                $native = [CLI.Native]::GetConsoleDisplayMode([ref]$mode) -and $mode -ne 0
+            }
+        }
+        if (-not $native) {
+            $sw = [CLI.Native]::GetSystemMetrics(0)
+            $sh = [CLI.Native]::GetSystemMetrics(1)
+            # Conhost snaps its window to whole cells, so a stretched window
+            # springs back to the grid and leaves uncovered strips. Fit the
+            # font to the panel instead: measure real cell sizes back from
+            # conhost and keep the largest font whose cells divide the
+            # screen (at 1280x720, 20px cells fit exactly: 128x36).
+            $bestFs = 28
+            $bestScore = [int]::MaxValue
+            foreach ($fs in 28, 26, 24, 22, 20, 18, 16) {
+                $font.SizeX = 0; $font.SizeY = $fs
+                [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
+                $cur = New-Object CLI.Native+CONSOLE_FONT_INFOEX
+                $cur.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($cur)
+                if (-not [CLI.Native]::GetCurrentConsoleFontEx($out, $false, [ref]$cur) -or $cur.SizeX -le 0) { continue }
+                $score = [Math]::Max($sw % $cur.SizeX, $sh % $cur.SizeY)
+                if ($score -lt $bestScore) { $bestScore = $score; $bestFs = $fs }
+                if ($score -le 2) { break }   # candidates run largest-first: first great fit wins
+            }
+            $font.SizeX = 0; $font.SizeY = $bestFs
+            [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
+
             $hwnd = [CLI.Native]::GetConsoleWindow()
             $style = [CLI.Native]::GetWindowLong($hwnd, -16)
             $style = $style -band (-bnot 0x00CF0000)   # caption, frame, sysmenu, min/max
@@ -569,8 +614,7 @@ function Get-SettingsItems {
                                     Name = ("Tab $($i + 1): $($tabs[$i].Name)".PadRight(30) + $desc) }
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
-    $list += [pscustomobject]@{ Key = 'Fullscreen'
-                                Name = ('Fullscreen'.PadRight(30) + $(if ($script:fsEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Fullscreen'; Name = 'Toggle fullscreen' }
     $list += [pscustomobject]@{ Key = 'Theme'
                                 Name = ('Color theme'.PadRight(30) + $script:themeName) }
     $list += [pscustomobject]@{ Key = 'Update'
@@ -1200,10 +1244,13 @@ try {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
                         'Fullscreen' {
-                            $script:fsEnabled = -not $script:fsEnabled
+                            # Stateless button: act on what the window IS,
+                            # not a remembered on/off. The result is still
+                            # persisted so the next launch matches.
+                            if (Test-ConsoleFullscreen) { $script:fsEnabled = $false; Set-ConsoleWindowed }
+                            else                        { $script:fsEnabled = $true;  Set-ConsoleFullscreen }
                             $settings['Fullscreen'] = $script:fsEnabled
                             Save-Settings
-                            if ($script:fsEnabled) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
                         }
                         'Theme'  {
                             $names = @($themes.Keys)
@@ -1259,7 +1306,6 @@ try {
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
                     if ($isVideo -and (Test-Path $vlcExe)) {
-                        Write-Host "   (menu will return here when VLC closes)" -ForegroundColor $theme.Hint
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
                     } else {
@@ -1297,7 +1343,6 @@ try {
                 }
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
-                Write-Host "   (menu will return here when the game closes)" -ForegroundColor $theme.Hint
                 Wait-ForGameExit $g
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 # bring the menu window back to the front, drop any keys
