@@ -921,8 +921,8 @@ function Draw-GameLine([int]$i) {
 function Get-StatusText {
     $parts = @()
     if ($tdpEnabled -and $script:tdpNowW -gt 0) { $parts += "$($script:tdpNowW)W" }
-    if ($script:showClock) { $parts += [DateTime]::Now.ToString('HH:mm') }
     if ($script:showBattery -and $script:batteryPct -ge 0) { $parts += "$($script:batteryPct)%" }
+    if ($script:showClock) { $parts += [DateTime]::Now.ToString('HH:mm') }   # clock rightmost, in the corner
     return ($parts -join ' ')
 }
 function Draw-Status {
