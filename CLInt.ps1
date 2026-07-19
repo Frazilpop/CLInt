@@ -856,11 +856,27 @@ function Get-PadKey {
 
 # Blocking wait for the next input, whichever device it comes from.
 # Returns a [ConsoleKey], so callers switch on it exactly like .Key.
+$script:bufferCheckNext = 0
 function Read-InputKey {
     while ($true) {
         if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
+        # The window can resize while we sit here waiting (the fullscreen
+        # transition settles a beat after launch, frames get dragged), and
+        # a buffer wider than the window means a scrollbar until the next
+        # keypress triggered a redraw. Re-pin the buffer promptly instead.
+        # Buffer only - no redraw, because modals share this loop.
+        if ([Environment]::TickCount -ge $script:bufferCheckNext) {
+            $script:bufferCheckNext = [Environment]::TickCount + 300
+            try {
+                $cw = [Console]::WindowWidth
+                $ch = [Console]::WindowHeight
+                if ([Console]::BufferWidth -ne $cw -or [Console]::BufferHeight -ne $ch) {
+                    $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cw, $ch)
+                }
+            } catch {}
+        }
         Start-Sleep -Milliseconds 16
     }
 }
