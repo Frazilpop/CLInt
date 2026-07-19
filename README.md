@@ -38,6 +38,8 @@ controller disconnects mid-session.
 | `Launch.ps1` | Single-instance launcher the desktop shortcut runs: focus / minimize / start. |
 | `SteamMenuKey.ahk` | Optional: binds a hardware key to the same toggle (key name read from `menu-key.txt`, default AppsKey). |
 | `Install.ps1` / `Install.bat` | One-shot setup: desktop shortcut, plus an optional press-a-key hotkey binding (offers to install AutoHotkey v2 if you want it). |
+| `Update.ps1` | The updater behind SETTINGS → Check for updates. |
+| `version.txt` | Current version, shown bottom-right in the app. |
 | `CLInt.ico` | The Happy Handheld. |
 
 ## Install
@@ -51,6 +53,15 @@ It then offers — entirely optionally — to bind a global hardware key
 that opens/hides the menu from anywhere: it installs AutoHotkey v2 if
 you agree, asks you to **press the key you want**, and wires it up. Skip
 it and the desktop shortcut alone is a complete install.
+
+## Updating
+
+**SETTINGS → Check for updates**, then press A. Git installs update via
+`git pull`; plain downloads compare `version.txt` against GitHub and
+fetch the latest files. Your settings (folders, TDP, hotkey choice) are
+separate files that updates never touch. The menu restarts itself after
+a successful update, and the version in the bottom-right corner is the
+quick way to see what you're on.
 
 ## Why conhost and not Windows Terminal?
 

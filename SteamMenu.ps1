@@ -100,6 +100,10 @@ function Get-NonSteamGames {
 $games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name)
 if ($games.Count -eq 0) { Write-Host "No installed Steam games found."; exit 1 }
 
+# App version: version.txt ships with the code and is bumped on every
+# update, so the in-app corner display and the updater can compare.
+$appVersion = try { (Get-Content (Join-Path $PSScriptRoot 'version.txt') -TotalCount 1).Trim() } catch { '?' }
+
 # ----------------------------------------------------------- Settings ---
 # User-configurable folders, editable from the SETTINGS tab in the app.
 $settingsFile = Join-Path $PSScriptRoot 'settings.json'
@@ -340,6 +344,8 @@ function Get-SettingsItems {
                            Name = ('Video folder'.PadRight(24) + $settings.VideoRoot) }
         [pscustomobject]@{ Key = 'LocalShortcutDir'; Label = 'Game shortcuts folder'
                            Name = ('Game shortcuts folder'.PadRight(24) + $settings.LocalShortcutDir) }
+        [pscustomobject]@{ Key = 'Update';           Label = 'Check for updates'
+                           Name = ('Check for updates'.PadRight(24) + "current: v$appVersion") }
     )
 }
 
@@ -463,6 +469,8 @@ function Draw-All {
             elseif ($tdpEnabled -and $tab -le 1) { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
     Write-At 15 3 $help 'DarkGray'
+    $ver = "v$appVersion"
+    Write-At ($W - $ver.Length - 2) ($H - 1) $ver 'DarkGray'
     if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' 'DarkGray' }
     Draw-List
 }
@@ -722,6 +730,30 @@ try {
                 if ($items.Count -eq 0) { break }
                 if ($tab -eq $SETTINGS_TAB) {
                     $s = $items[$selected]
+                    if ($s.Key -eq 'Update') {
+                        Clear-Host
+                        Write-Host ""
+                        Write-Host "   CHECKING FOR UPDATES..." -ForegroundColor Cyan
+                        Write-Host ""
+                        powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Update.ps1')
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host ""
+                            Write-Host "   Updated - restarting the menu..." -ForegroundColor Green
+                            Start-Sleep -Seconds 2
+                            if ($script:instanceMutex) {
+                                try { $script:instanceMutex.ReleaseMutex() } catch {}
+                                $script:instanceMutex.Dispose()
+                            }
+                            Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
+                                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\SteamMenu.ps1`""
+                            exit 0
+                        }
+                        Write-Host ""
+                        Write-Host "   press any button to go back" -ForegroundColor DarkGray
+                        Read-InputKey | Out-Null
+                        Draw-All
+                        break
+                    }
                     $picked = Pick-Folder $s.Label $settings[$s.Key]
                     if ($picked) { Apply-Setting $s.Key $picked }
                     $script:items = @(Get-TabItems $tab)
