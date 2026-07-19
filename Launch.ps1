@@ -32,3 +32,13 @@ if ($hwnd -ne [IntPtr]::Zero) {
 # Conhost has no WinUI, and CLInt.ps1 makes it borderless fullscreen.
 Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""
+# Focus-steal protection can leave the new window fullscreen but unfocused,
+# with the previous app still eating gamepad input; activate it explicitly.
+for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 250
+    $new = [Win32.Native]::FindWindowW($null, 'CLInt')
+    if ($new -ne [IntPtr]::Zero) {
+        [Win32.Native]::SetForegroundWindow($new) | Out-Null
+        break
+    }
+}

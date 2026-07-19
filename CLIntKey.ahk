@@ -40,5 +40,10 @@ ToggleMenu(*) {
         }
     } else {
         Run 'conhost.exe powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' A_ScriptDir '\CLInt.ps1"'
+        ; Focus-steal protection can leave the new window fullscreen on top
+        ; but without keyboard focus - the previously focused app then keeps
+        ; reacting to the gamepad. Activate it explicitly once it appears.
+        if WinWait("CLInt", , 10)
+            WinActivate
     }
 }

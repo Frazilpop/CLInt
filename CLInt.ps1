@@ -303,6 +303,21 @@ try {
     }
 } catch {}
 
+# Focus tracking: XInput delivers controller state regardless of which
+# window has keyboard focus, so the menu must check it holds the
+# foreground before acting - otherwise a still-focused app behind us
+# (e.g. Windows Terminal, whose WinUI tab bar reacts to the gamepad and
+# pops tooltips over everything) processes the same presses in parallel.
+$script:conHwnd = [IntPtr]::Zero
+try {
+    Add-Type -Namespace CLIntFocus -Name Win -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+'@
+    $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
+} catch {}
+
 # One mascot per tab type: rocket = Steam launches, handheld = shortcuts
 # on this machine, VHS = files/videos, robot = settings.
 $logoArt = @{
@@ -623,6 +638,14 @@ function Get-PadKey {
     if (-not $script:padOk) { return $null }
     $b = [CLIntPad.XInput]::GetButtons()
     if ($b -lt 0) { $script:padOk = $false; return $null }   # no XInput DLL on this system
+    if ($script:conHwnd -ne [IntPtr]::Zero -and
+        [CLIntFocus.Win]::GetForegroundWindow() -ne $script:conHwnd) {
+        # Another window has focus: those presses belong to it. Track the
+        # state anyway so nothing fires spuriously when focus returns.
+        $script:padPrev = $b
+        $script:padHeld = $null
+        return $null
+    }
     $fresh = $b -band (-bnot $script:padPrev)
     $script:padPrev = $b
     foreach ($m in $PAD_BUTTONS) {
@@ -867,6 +890,13 @@ function Move-Selection([int]$delta) {
 try {
     [Console]::CursorVisible = $false
     Set-ConsoleFullscreen
+    # Claim the foreground for real: launched from a hotkey or shortcut
+    # while another app is focused, a new conhost can be denied focus by
+    # Windows - it looks fullscreen but keyboard focus stays behind it.
+    if ($script:conHwnd -ne [IntPtr]::Zero) {
+        try { [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null } catch {}
+    }
+    try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
     Draw-All
     # Drop any keypress still buffered from launching the shortcut (e.g. the
     # Enter that opened it), otherwise it instantly launches the first game.
