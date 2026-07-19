@@ -183,11 +183,18 @@ function Save-Settings {
 }
 
 # The Steam library is only scanned when a Steam tab is configured (or for
-# -List); machines without Steam just don't get Steam tabs.
+# -List); machines without Steam just don't get Steam tabs. Whether the
+# library includes non-Steam shortcuts is a SETTINGS toggle (default on).
+$nonSteamEnabled = $settings['NonSteam'] -ne $false
+function Get-SteamLibrary {
+    $g = @(Get-InstalledGames)
+    if ($script:nonSteamEnabled) { $g += @(Get-NonSteamGames) }
+    return @($g | Sort-Object Name)
+}
 $games = @()
 $needSteam = $List -or @($settings['Tabs'] | Where-Object { $_.Type -eq 'Steam' }).Count -gt 0
 if ($needSteam) {
-    try { $games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name) } catch {}
+    try { $games = @(Get-SteamLibrary) } catch {}
 }
 
 # Shortcut-folder tabs: .lnk files collected in one folder, launched via
@@ -761,6 +768,8 @@ function Get-SettingsItems {
                                 Name = ('Show clock'.PadRight(30) + $(if ($script:showClock) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'ShowBattery'
                                 Name = ('Show battery'.PadRight(30) + $(if ($script:showBattery) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'NonSteam'
+                                Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Recent'
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'VideoHist'
@@ -1405,7 +1414,7 @@ function Add-TabConfig {
     switch ($choice) {
         0 {
             if ($games.Count -eq 0) {
-                try { $script:games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name) } catch {}
+                try { $script:games = @(Get-SteamLibrary) } catch {}
                 Add-MaProfileTags $games
             }
             $newTab = @{ Type = 'Steam' }
@@ -1629,6 +1638,14 @@ try {
                             $settings['Recent'] = $script:recentEnabled
                             Save-Settings
                             Build-Tabs   # apply or undo the recent-first sorting
+                        }
+                        'NonSteam' {
+                            $script:nonSteamEnabled = -not $script:nonSteamEnabled
+                            $settings['NonSteam'] = $script:nonSteamEnabled
+                            Save-Settings
+                            try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
+                            Add-MaProfileTags $games
+                            Build-Tabs   # rebuild Steam tabs with/without non-Steam apps
                         }
                         'AutoCheck' {
                             $script:autoCheck = -not $script:autoCheck
