@@ -499,6 +499,56 @@ $theme = $themes[$themeName]
 $textSizes = [ordered]@{ small = 20; medium = 28; large = 34 }
 $textSizeName = if ($settings['TextSize'] -and $textSizes.Contains([string]$settings['TextSize'])) { [string]$settings['TextSize'] } else { 'medium' }
 
+# Behaviour toggles (all in SETTINGS). Clock/battery/recently-played
+# default on; the launch-time update check is opt-in.
+$showClock     = $settings['ShowClock']       -ne $false
+$showBattery   = $settings['ShowBattery']     -ne $false
+$recentEnabled = $settings['Recent']          -ne $false
+$autoCheck     = $settings['AutoUpdateCheck'] -eq $true
+$inModal = $false        # modals suppress the idle clock/battery repaint
+$batteryPct = -1
+$batteryNext = 0
+$statusLast = ''
+$updateNoticeShown = $false
+
+# Recently played: recent.json maps a game key (AppId / local:<name>)
+# to last-played time and total minutes. Only touched while the feature
+# is enabled.
+$recentFile = Join-Path $PSScriptRoot 'recent.json'
+$recentMap = @{}
+if (Test-Path $recentFile) {
+    try {
+        (Get-Content $recentFile -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $recentMap[$_.Name] = $_.Value }
+    } catch {}
+}
+function Save-RecentMap {
+    try { [pscustomobject]$script:recentMap | ConvertTo-Json | Set-Content $script:recentFile -Encoding utf8 } catch {}
+}
+function Record-Play($game, [double]$mins) {
+    $k = [string]$game.AppId
+    $prevMins = 0.0
+    if ($script:recentMap[$k]) { try { $prevMins = [double]$script:recentMap[$k].Mins } catch {} }
+    $script:recentMap[$k] = [pscustomobject]@{
+        Last = [DateTime]::Now.ToString('s')
+        Mins = [Math]::Round($prevMins + [Math]::Max(0, $mins), 1)
+    }
+    Save-RecentMap
+}
+# Recently played games first (most recent at the top); everything else
+# keeps its alphabetical order. No-op while the feature is off.
+function Sort-Games($list) {
+    if (-not $script:recentEnabled -or $script:recentMap.Count -eq 0) { return @($list) }
+    $recent = @(); $rest = @()
+    foreach ($g in $list) {
+        if ($script:recentMap[[string]$g.AppId]) { $recent += $g } else { $rest += $g }
+    }
+    $recent = @($recent | Sort-Object {
+        try { [DateTime]$script:recentMap[[string]$_.AppId].Last } catch { [DateTime]::MinValue }
+    } -Descending)
+    return @($recent + $rest)
+}
+
 $isFullscreen = $false   # what the window IS right now (owned by the Set-Console* functions)
 
 # Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
@@ -551,17 +601,18 @@ function New-TabState($cfg) {
                 if ($col) {
                     $inCol = @{}
                     foreach ($a in $col.Added) { $inCol[$a] = $true }
-                    $t.Items = @($games | Where-Object { $inCol[[string]$_.AppId] })
+                    $t.Items = @(Sort-Games @($games | Where-Object { $inCol[[string]$_.AppId] }))
                 } else {
                     $t.Items = @()   # collection no longer exists in Steam
                 }
             } else {
-                $t.Items = $games
+                $t.Items = @(Sort-Games $games)
             }
         }
         'Shortcuts' {
             $t.Items = @(Get-ShortcutGames $cfg.Path)
             Add-MaProfileTags $t.Items
+            $t.Items = @(Sort-Games $t.Items)
         }
         'Files'     {
             $t.Root  = $cfg.Path
@@ -621,12 +672,26 @@ function Get-SettingsItems {
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
     $list += [pscustomobject]@{ Key = 'Fullscreen'; Name = 'Toggle fullscreen' }
+    $list += [pscustomobject]@{ Key = 'ShowClock'
+                                Name = ('Show clock'.PadRight(30) + $(if ($script:showClock) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'ShowBattery'
+                                Name = ('Show battery'.PadRight(30) + $(if ($script:showBattery) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Recent'
+                                Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'AutoCheck'
+                                Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'TextSize'
                                 Name = ('Text size'.PadRight(30) + $script:textSizeName) }
     $list += [pscustomobject]@{ Key = 'Theme'
                                 Name = ('Color theme'.PadRight(30) + $script:themeName) }
-    $list += [pscustomobject]@{ Key = 'Update'
-                                Name = ('Check for updates'.PadRight(30) + "current: v$appVersion") }
+    $updName = 'Check for updates'.PadRight(30) + "current: v$appVersion"
+    $marker = Join-Path $PSScriptRoot 'update-available.txt'
+    if (Test-Path $marker) {
+        $nv = ''
+        try { $nv = ([string](Get-Content $marker -TotalCount 1)).Trim() } catch {}
+        if ($nv) { $updName += "  ->  v$nv available" }
+    }
+    $list += [pscustomobject]@{ Key = 'Update'; Name = $updName }
     $list += [pscustomobject]@{ Key = 'Quit'; Name = '[ quit CLInt ]' }
     return $list
 }
@@ -726,6 +791,13 @@ function Draw-GameLine([int]$i) {
         $tdp = Get-GameTdp $items[$i]
         if ($items[$i].MaProfile) { $label += "  [MA profile]" }
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
+        if ($script:recentEnabled) {
+            $rp = $script:recentMap[[string]$items[$i].AppId]
+            if ($rp) {
+                $m = 0.0; try { $m = [double]$rp.Mins } catch {}
+                if ($m -ge 60) { $label += "  [$([int]($m / 60))h]" }
+            }
+        }
     }
     if ($i -eq $selected) {
         Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) $theme.SelFg $theme.Accent
@@ -733,6 +805,23 @@ function Draw-GameLine([int]$i) {
         $fg = if ($type -eq 'Files' -and $items[$i].Type -ne 'File') { $theme.Bright } else { $theme.Text }
         Write-At 1 $y (Pad ("     " + $label + "  ") $lineW) $fg
     }
+}
+
+# Clock / battery, right-aligned on the header's spare row. Battery is
+# hidden automatically when the machine reports none.
+function Get-StatusText {
+    $parts = @()
+    if ($script:showClock) { $parts += [DateTime]::Now.ToString('HH:mm') }
+    if ($script:showBattery -and $script:batteryPct -ge 0) { $parts += "$($script:batteryPct)%" }
+    return ($parts -join '  ')
+}
+function Draw-Status {
+    try {
+        if ($W -le 40) { return }
+        $txt = (Get-StatusText).PadLeft(14)
+        Write-At ($W - 16) 2 $txt $theme.Info
+        $script:statusLast = $txt
+    } catch {}
 }
 
 $noticeShown = $false
@@ -751,6 +840,7 @@ function Clear-Notice {
 function Draw-All {
     Clear-Host
     Get-Layout
+    $script:inModal = $false   # every modal exits through a full redraw
     $script:noticeShown = $false
     $cur = $tabs[$tab]
     $logo = if ($cur.Logo) { $cur.Logo } else { $mascots[$typeMascot[$cur.Type]] }
@@ -792,12 +882,18 @@ function Draw-All {
             elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
     Write-At 15 3 $help $theme.Hint
+    Draw-Status
     if ($items.Count -eq 0) {
         $msg = if ($cur.Type -eq 'Shortcuts') { 'No .lnk shortcuts in this folder - press A to choose another folder or remove this tab.' }
                else { 'Nothing found here.' }
         Write-At 6 $listTop (Pad $msg ($W - 8)) $theme.Hint
     }
     Draw-List
+    if ($script:autoCheck -and -not $script:updateNoticeShown -and
+        (Test-Path (Join-Path $PSScriptRoot 'update-available.txt'))) {
+        $script:updateNoticeShown = $true
+        Show-Notice 'Update available  -  SETTINGS -> Check for updates'
+    }
 }
 
 # Repaint only the list viewport, without Clear-Host, so scrolling doesn't
@@ -857,6 +953,7 @@ $PAD_BUTTONS = @(
     @{ Mask = 0x2000; Key = [ConsoleKey]::Escape;     Repeat = $false }   # B = back/quit
     @{ Mask = 0x8000; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # Y = next tab
     @{ Mask = 0x0200; Key = [ConsoleKey]::F5;         Repeat = $false }   # RB = cycle TDP
+    @{ Mask = 0x0100; Key = [ConsoleKey]::PageDown;   Repeat = $true  }   # LB = jump a page
 )
 $script:padPrev = 0
 $script:padHeld = $null
@@ -918,6 +1015,17 @@ function Read-InputKey {
                 }
             } catch {}
             Hide-Scrollbars   # conhost leaves stale bars behind after transient mismatches
+            # clock/battery refresh (suppressed while a modal owns the screen)
+            if (-not $script:inModal) {
+                if ([Environment]::TickCount -ge $script:batteryNext) {
+                    $script:batteryNext = [Environment]::TickCount + 60000
+                    $b = $null
+                    try { $b = (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue |
+                                Select-Object -First 1).EstimatedChargeRemaining } catch {}
+                    $script:batteryPct = if ($null -ne $b) { [int]$b } else { -1 }
+                }
+                if ((Get-StatusText).PadLeft(14) -ne $script:statusLast) { Draw-Status }
+            }
         }
         Start-Sleep -Milliseconds 16
     }
@@ -952,6 +1060,7 @@ function Get-PickerEntries($dir) {
 # top entry, B goes up a level (above a drive root: the drive list, then
 # cancel). Returns the chosen path, or $null if cancelled.
 function Pick-Folder([string]$label, [string]$start) {
+    $script:inModal = $true
     $dir = $start
     if (-not $dir -or -not (Test-Path $dir -ErrorAction SilentlyContinue)) { $dir = $env:USERPROFILE }
     $sel = 0; $off = 0
@@ -1015,6 +1124,7 @@ function Pick-Folder([string]$label, [string]$start) {
 
 # Small modal list of choices; returns the chosen index, or -1 on cancel.
 function Pick-Option([string]$title, [string[]]$options) {
+    $script:inModal = $true
     $sel = 0
     Clear-Host
     Get-Layout
@@ -1038,6 +1148,7 @@ function Pick-Option([string]$title, [string[]]$options) {
 # Icon picker: mascot list on the left, live art preview on the right.
 # Returns a mascot name, '::auto' for automatic assignment, $null on cancel.
 function Pick-Mascot([string]$title, [string]$current) {
+    $script:inModal = $true
     $names = @($mascots.Keys | Where-Object { $_ -ne 'robot' })   # robot belongs to SETTINGS
     $entries = @('(automatic)') + $names
     $sel = [Math]::Max(0, [array]::IndexOf($entries, $current))
@@ -1070,6 +1181,7 @@ function Pick-Mascot([string]$title, [string]$current) {
 # Returns the text, or $null if cancelled. An empty result means "no
 # override" - callers treat it as "back to the automatic value".
 function Read-TextInput([string]$title, [string]$current) {
+    $script:inModal = $true
     Clear-Host
     Get-Layout
     Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
@@ -1256,6 +1368,14 @@ try {
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
     Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
+    # Opt-in quiet update check: a hidden helper compares versions and
+    # leaves update-available.txt for the UI to notice. Never blocks.
+    if ($script:autoCheck) {
+        try {
+            Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
+                "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'Update.ps1')`" -CheckOnly"
+        } catch {}
+    }
     Draw-All
     # Drop any keypress still buffered from launching the shortcut (e.g. the
     # Enter that opened it), otherwise it instantly launches the first game.
@@ -1271,6 +1391,8 @@ try {
         switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
+            'PageDown'  { Move-Selection $visible }      # LB on the pad
+            'PageUp'    { Move-Selection (-$visible) }
             'Home'      { Move-Selection (-$selected) }
             'End'       { Move-Selection ($items.Count - 1 - $selected) }
             'LeftArrow'  { Switch-Tab -1 }
@@ -1315,6 +1437,27 @@ try {
                             # Session-only: nothing is persisted, so the next
                             # launch always starts fullscreen again.
                             if ($script:isFullscreen) { Set-ConsoleWindowed } else { Set-ConsoleFullscreen }
+                        }
+                        'ShowClock' {
+                            $script:showClock = -not $script:showClock
+                            $settings['ShowClock'] = $script:showClock
+                            Save-Settings
+                        }
+                        'ShowBattery' {
+                            $script:showBattery = -not $script:showBattery
+                            $settings['ShowBattery'] = $script:showBattery
+                            Save-Settings
+                        }
+                        'Recent' {
+                            $script:recentEnabled = -not $script:recentEnabled
+                            $settings['Recent'] = $script:recentEnabled
+                            Save-Settings
+                            Build-Tabs   # apply or undo the recent-first sorting
+                        }
+                        'AutoCheck' {
+                            $script:autoCheck = -not $script:autoCheck
+                            $settings['AutoUpdateCheck'] = $script:autoCheck
+                            Save-Settings
                         }
                         'TextSize' {
                             $names = @($textSizes.Keys)
@@ -1418,10 +1561,21 @@ try {
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
                     Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
+                $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
                 Wait-ForGameExit $g
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
+                if ($script:recentEnabled) {
+                    Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
+                    # bubble the just-played game to the top of every game tab
+                    foreach ($gt in $tabs) {
+                        if ($gt.Type -in 'Steam', 'Shortcuts') { $gt.Items = @(Sort-Games $gt.Items) }
+                    }
+                    $script:items    = $cur.Items
+                    $script:selected = [Math]::Max(0, [array]::IndexOf($cur.Items, $g))
+                    $script:offset   = 0
+                }
                 # bring the menu window back to the front, drop any keys
                 # pressed while the game was running, and redraw
                 try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
