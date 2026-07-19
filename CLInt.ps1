@@ -1048,6 +1048,18 @@ function Move-Selection([int]$delta) {
 try {
     [Console]::CursorVisible = $false
     Set-ConsoleFullscreen
+    # Black backdrop just behind the console: conhost fullscreen quantizes
+    # to whole character cells and some (mostly older) graphics stacks leave
+    # stale pixels in the edge strips it should paint black. The helper only
+    # shows itself while the menu is foreground and exits with us.
+    $script:backdropProc = $null
+    $backdropScript = Join-Path $PSScriptRoot 'Backdrop.ps1'
+    if ((Test-Path $backdropScript) -and $script:conHwnd -ne [IntPtr]::Zero) {
+        try {
+            $script:backdropProc = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList `
+                "-NoProfile -ExecutionPolicy Bypass -File `"$backdropScript`" -OwnerPid $PID -ConsoleHwnd $([int64]$script:conHwnd)"
+        } catch {}
+    }
     # Claim the foreground for real: launched from a hotkey or shortcut
     # while another app is focused, a new conhost can be denied focus by
     # Windows - it looks fullscreen but keyboard focus stays behind it.
@@ -1246,4 +1258,7 @@ try {
     }
 } finally {
     [Console]::CursorVisible = $true
+    if ($script:backdropProc) {
+        try { Stop-Process -Id $script:backdropProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
 }
