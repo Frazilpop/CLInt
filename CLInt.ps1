@@ -936,9 +936,9 @@ function Draw-Status {
         $script:statusLast = $txt
         if ($script:statusDrawnLen -gt $txt.Length) {
             # a previously longer readout left characters behind: blank them
-            Write-At ($W - $script:statusDrawnLen - 2) 0 (' ' * ($script:statusDrawnLen - $txt.Length)) $theme.Info
+            Write-At ($W - $script:statusDrawnLen) 0 (' ' * ($script:statusDrawnLen - $txt.Length)) $theme.Info
         }
-        if ($txt) { Write-At ($W - $txt.Length - 2) 0 $txt $theme.Info }
+        if ($txt) { Write-At ($W - $txt.Length) 0 $txt $theme.Info }   # flush to the right edge
         $script:statusDrawnLen = $txt.Length
     } catch {}
 }
@@ -973,7 +973,7 @@ function Draw-All {
     # keep clear of the TDP/clock/battery in the top-right corner -
     # reserving exactly what the current readout needs, no more
     $st = Get-StatusText
-    $statusReserve = if ($st) { $st.Length + 3 } else { 0 }
+    $statusReserve = if ($st) { $st.Length + 2 } else { 0 }
     $script:statusReserved = $statusReserve
     $avail = [Math]::Max(10, $W - $x - 1 - $statusReserve)
     $names = @($tabs | ForEach-Object { [string]$_.Name })
@@ -1157,7 +1157,7 @@ function Read-InputKey {
                     # grown past the reserved corner (TDP first appearing,
                     # battery hitting 100%)? re-fit the tabs with a full
                     # redraw; otherwise update the corner in place.
-                    if ($stNow.Length + 3 -gt $script:statusReserved) { Draw-All }
+                    if ($stNow.Length + 2 -gt $script:statusReserved) { Draw-All }
                     else { Draw-Status }
                 }
             }
