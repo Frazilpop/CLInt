@@ -657,8 +657,13 @@ function Read-InputKey {
 function Get-PickerEntries($dir) {
     $list = @()
     if ($null -eq $dir) {   # drive list
-        foreach ($d in (Get-PSDrive -PSProvider FileSystem | Sort-Object Name)) {
-            if (Test-Path $d.Root) {
+        # A drive can be present but dying (card readers, USB drives mid-
+        # disconnect) - probing it may throw, and with EAP=Stop that used
+        # to take the whole app down. Skip anything that won't answer.
+        foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $alive = $false
+            try { $alive = Test-Path $d.Root -ErrorAction SilentlyContinue } catch {}
+            if ($alive) {
                 $list += [pscustomobject]@{ Name = $d.Root; Path = $d.Root; Type = 'Dir' }
             }
         }
@@ -676,7 +681,7 @@ function Get-PickerEntries($dir) {
 # cancel). Returns the chosen path, or $null if cancelled.
 function Pick-Folder([string]$label, [string]$start) {
     $dir = $start
-    if (-not $dir -or -not (Test-Path $dir)) { $dir = $env:USERPROFILE }
+    if (-not $dir -or -not (Test-Path $dir -ErrorAction SilentlyContinue)) { $dir = $env:USERPROFILE }
     $sel = 0; $off = 0
     $entries = @()
     $needList = $true
@@ -870,6 +875,10 @@ try {
     while ($true) {
         $key = Read-InputKey
         $cur = $tabs[$tab]
+        # Safety net: with EAP=Stop, any unexpected error (a dying drive, a
+        # file with no association, ...) would otherwise unwind straight out
+        # of the loop and close the app. Log it, tell the user, carry on.
+        try {
         switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
@@ -991,6 +1000,16 @@ try {
                 Clear-Host; exit 0
             }
             'Q'         { Clear-Host; exit 0 }
+        }
+        } catch {
+            try {
+                "$(Get-Date -Format s)  $($_.Exception.Message)`n$($_.ScriptStackTrace)`n" |
+                    Add-Content (Join-Path $PSScriptRoot 'error.log')
+            } catch {}
+            try {
+                Draw-All
+                Show-Notice "Oops - that failed ($($_.Exception.Message -replace '\s+', ' ')). Logged to error.log"
+            } catch {}
         }
         # redraw if the window was resized
         if ($W -ne [Console]::WindowWidth -or $H -ne [Console]::WindowHeight) { Draw-All }
