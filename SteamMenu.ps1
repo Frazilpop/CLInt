@@ -482,6 +482,84 @@ function Draw-List {
 
 # ------------------------------------------------------ folder picker ---
 
+# --- Native gamepad input (XInput) -------------------------------------
+# The menu reads the controller directly through XInput, so no AutoHotkey
+# key translation is needed while CLInt is focused. Buttons map onto the
+# same ConsoleKey values the keyboard switch statements already handle,
+# and a disconnected controller is simply "no buttons pressed"
+# (XInputGetState returns non-zero) - nothing to crash.
+$script:padOk = $true
+try {
+    Add-Type -Namespace CLIntPad -Name XInput -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+private struct XINPUT_GAMEPAD { public ushort wButtons; public byte bLeftTrigger; public byte bRightTrigger; public short sThumbLX; public short sThumbLY; public short sThumbRX; public short sThumbRY; }
+[StructLayout(LayoutKind.Sequential)]
+private struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
+[DllImport("xinput1_4.dll")]
+private static extern uint XInputGetState(uint dwUserIndex, ref XINPUT_STATE pState);
+public static int GetButtons() {
+    int b = 0;
+    var s = new XINPUT_STATE();
+    for (uint i = 0; i < 4; i++) {
+        try { if (XInputGetState(i, ref s) == 0) b |= s.Gamepad.wButtons; }
+        catch (DllNotFoundException) { return -1; }
+    }
+    return b;
+}
+'@
+} catch { $script:padOk = $false }
+
+# Button masks -> menu keys; d-pad directions auto-repeat while held.
+$PAD_BUTTONS = @(
+    @{ Mask = 0x0001; Key = [ConsoleKey]::UpArrow;    Repeat = $true  }   # d-pad up
+    @{ Mask = 0x0002; Key = [ConsoleKey]::DownArrow;  Repeat = $true  }   # d-pad down
+    @{ Mask = 0x0004; Key = [ConsoleKey]::LeftArrow;  Repeat = $true  }   # d-pad left
+    @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $true  }   # d-pad right
+    @{ Mask = 0x1000; Key = [ConsoleKey]::Enter;      Repeat = $false }   # A = launch/open
+    @{ Mask = 0x2000; Key = [ConsoleKey]::Escape;     Repeat = $false }   # B = back/quit
+    @{ Mask = 0x8000; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # Y = next tab
+    @{ Mask = 0x0200; Key = [ConsoleKey]::F5;         Repeat = $false }   # RB = cycle TDP
+)
+$script:padPrev = 0
+$script:padHeld = $null
+$PAD_DELAY  = 350    # ms a direction must be held before it starts repeating
+$PAD_REPEAT = 50     # ms between repeats while held
+
+function Get-PadKey {
+    if (-not $script:padOk) { return $null }
+    $b = [CLIntPad.XInput]::GetButtons()
+    if ($b -lt 0) { $script:padOk = $false; return $null }   # no XInput DLL on this system
+    $fresh = $b -band (-bnot $script:padPrev)
+    $script:padPrev = $b
+    foreach ($m in $PAD_BUTTONS) {
+        if ($fresh -band $m.Mask) {
+            $script:padHeld = if ($m.Repeat) {
+                @{ Mask = $m.Mask; Key = $m.Key; Until = [Environment]::TickCount + $PAD_DELAY }
+            } else { $null }
+            return $m.Key
+        }
+    }
+    if ($script:padHeld) {
+        if (-not ($b -band $script:padHeld.Mask)) { $script:padHeld = $null }
+        elseif ([Environment]::TickCount -ge $script:padHeld.Until) {
+            $script:padHeld.Until = [Environment]::TickCount + $PAD_REPEAT
+            return $script:padHeld.Key
+        }
+    }
+    return $null
+}
+
+# Blocking wait for the next input, whichever device it comes from.
+# Returns a [ConsoleKey], so callers switch on it exactly like .Key.
+function Read-InputKey {
+    while ($true) {
+        if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
+        $k = Get-PadKey
+        if ($null -ne $k) { return $k }
+        Start-Sleep -Milliseconds 16
+    }
+}
+
 function Get-PickerEntries($dir) {
     $list = @()
     if ($null -eq $dir) {   # drive list
@@ -533,8 +611,8 @@ function Pick-Folder([string]$label, [string]$start) {
                 Write-At 1 ($top + $r) (' ' * $w) 'Gray'
             }
         }
-        $key = [Console]::ReadKey($true)
-        switch ($key.Key) {
+        $key = Read-InputKey
+        switch ($key) {
             'UpArrow'   { if ($entries.Count) { $sel = ($sel - 1 + $entries.Count) % $entries.Count } }
             'DownArrow' { if ($entries.Count) { $sel = ($sel + 1) % $entries.Count } }
             'Enter'     {
@@ -627,8 +705,8 @@ try {
     Start-Sleep -Milliseconds 400
     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
     while ($true) {
-        $key = [Console]::ReadKey($true)
-        switch ($key.Key) {
+        $key = Read-InputKey
+        switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
             'Home'      { Move-Selection (-$selected) }
@@ -703,7 +781,7 @@ try {
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
             }
-            'F5'        {   # RB on the gamepad (claude-gamepad.ahk sends F5 in this window)
+            'F5'        {   # RB on the gamepad (read natively via XInput)
                 if ($tdpEnabled -and $tab -le 1 -and $items.Count -gt 0) {
                     $g = $games[$selected]
                     if ($g.MaProfile) {

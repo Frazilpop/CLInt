@@ -25,14 +25,18 @@ thing runs in a console window.
 D-pad up/down to move, left/right (or Y) to switch tabs, A/Enter to
 launch, B to go back/quit, RB to cycle TDP for the highlighted game.
 
+The controller is read **natively via XInput** — no key-remapping layer
+needed. Keyboard works too, and everything degrades gracefully if the
+controller disconnects mid-session.
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `SteamMenu.ps1` | The menu itself. Runs under **conhost**, fullscreen. |
 | `Launch.ps1` | Single-instance launcher the desktop shortcut runs: focus / minimize / start. |
-| `SteamMenuKey.ahk` | Binds the GPD menu ("page icon") key to the same toggle. |
-| `Install.ps1` / `Install.bat` | One-shot setup: AutoHotkey v2, desktop shortcut, startup entry. |
+| `SteamMenuKey.ahk` | Optional: binds a hardware key to the same toggle (key name read from `menu-key.txt`, default AppsKey). |
+| `Install.ps1` / `Install.bat` | One-shot setup: desktop shortcut, plus an optional press-a-key hotkey binding (offers to install AutoHotkey v2 if you want it). |
 | `CLInt.ico` | The Happy Handheld. |
 
 ## Install
@@ -41,6 +45,11 @@ Put this folder anywhere (a removable drive is fine) and run
 `Install.bat`. The installer copies the icon to `%LOCALAPPDATA%\CLInt` so
 the desktop shortcut keeps its icon even when the folder's drive mounts
 late at boot.
+
+It then offers — entirely optionally — to bind a global hardware key
+that opens/hides the menu from anywhere: it installs AutoHotkey v2 if
+you agree, asks you to **press the key you want**, and wires it up. Skip
+it and the desktop shortcut alone is a complete install.
 
 ## Why conhost and not Windows Terminal?
 
