@@ -510,6 +510,8 @@ $batteryPct = -1
 $batteryNext = 0
 $tdpNowW = -1            # live TDP watts (Motion Assistant machines only)
 $statusLast = ''
+$statusDrawnLen = 0      # width of the last corner draw, for clean blanking
+$statusReserved = 0      # corner columns the tab bar left free at last full draw
 $updateNoticeShown = $false
 
 # Recently played: recent.json maps a game key (AppId / local:<name>)
@@ -917,10 +919,16 @@ function Get-StatusText {
 function Draw-Status {
     try {
         if ($W -le 44) { return }
-        # top-right corner, on the tab-bar row (which reserves this space)
-        $txt = (Get-StatusText).PadLeft(15)
-        Write-At ($W - 16) 0 $txt $theme.Info
+        # top-right corner, on the tab-bar row; drawn at exactly the text's
+        # width so the tabs can use everything to its left
+        $txt = Get-StatusText
         $script:statusLast = $txt
+        if ($script:statusDrawnLen -gt $txt.Length) {
+            # a previously longer readout left characters behind: blank them
+            Write-At ($W - $script:statusDrawnLen - 2) 0 (' ' * ($script:statusDrawnLen - $txt.Length)) $theme.Info
+        }
+        if ($txt) { Write-At ($W - $txt.Length - 2) 0 $txt $theme.Info }
+        $script:statusDrawnLen = $txt.Length
     } catch {}
 }
 
@@ -951,8 +959,11 @@ function Draw-All {
     # the names themselves so every tab stays visible and nothing can ever
     # write past the row's end (which would wrap or scroll).
     $x = 15
-    # keep clear of the TDP/clock/battery in the top-right corner
-    $statusReserve = if (Get-StatusText) { 17 } else { 0 }
+    # keep clear of the TDP/clock/battery in the top-right corner -
+    # reserving exactly what the current readout needs, no more
+    $st = Get-StatusText
+    $statusReserve = if ($st) { $st.Length + 3 } else { 0 }
+    $script:statusReserved = $statusReserve
     $avail = [Math]::Max(10, $W - $x - 1 - $statusReserve)
     $names = @($tabs | ForEach-Object { [string]$_.Name })
     $nameLen = ($names | ForEach-Object { $_.Length } | Measure-Object -Sum).Sum
@@ -1130,7 +1141,14 @@ function Read-InputKey {
                         try { $t = Get-CurrentTdp; if ($t) { $script:tdpNowW = [int][Math]::Round($t.Stapm) } } catch {}
                     }
                 }
-                if ((Get-StatusText).PadLeft(15) -ne $script:statusLast) { Draw-Status }
+                $stNow = Get-StatusText
+                if ($stNow -ne $script:statusLast) {
+                    # grown past the reserved corner (TDP first appearing,
+                    # battery hitting 100%)? re-fit the tabs with a full
+                    # redraw; otherwise update the corner in place.
+                    if ($stNow.Length + 3 -gt $script:statusReserved) { Draw-All }
+                    else { Draw-Status }
+                }
             }
         }
         Start-Sleep -Milliseconds 16
