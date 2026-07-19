@@ -781,6 +781,7 @@ function Get-SettingsItems {
     }
     $list += [pscustomobject]@{ Key = 'Update'; Name = $updName }
     $list += [pscustomobject]@{ Key = 'ClearHist'; Name = '[ clear history ]' }
+    $list += [pscustomobject]@{ Key = 'ResetAll'; Name = '[ reset all settings ]' }
     $list += [pscustomobject]@{ Key = 'Quit'; Name = '[ quit CLInt ]' }
     return $list
 }
@@ -1544,23 +1545,44 @@ try {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
                         'Quit'   { Clear-Host; exit 0 }
+                        'ResetAll' {
+                            $c = Pick-Option 'RESET ALL SETTINGS - ARE YOU SURE?' @(
+                                'Yes - reset tabs, theme and options to defaults (restarts CLInt)', 'Cancel')
+                            if ($c -eq 0) {
+                                # tabs, theme, text size, toggles - all of
+                                # settings.json. History files stay (that is
+                                # what clear history is for).
+                                Remove-Item (Join-Path $PSScriptRoot 'settings.json') -Force -ErrorAction SilentlyContinue
+                                if ($script:instanceMutex) {
+                                    try { $script:instanceMutex.ReleaseMutex() } catch {}
+                                    $script:instanceMutex.Dispose()
+                                }
+                                Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
+                                    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""
+                                exit 0
+                            }
+                        }
                         'VlcInfo' {
                             $script:pendingNotice = 'With VLC (videolan.org): fullscreen playback, the menu returns when a video ends, and resume markers work.'
                         }
                         'ClearHist' {
                             $c = Pick-Option 'CLEAR HISTORY' @(
                                 'Recently played (games)', 'Video play counts', 'Both', 'Cancel')
-                            if ($c -eq 0 -or $c -eq 2) {
-                                $script:recentMap = @{}
-                                Remove-Item (Join-Path $PSScriptRoot 'recent.json') -Force -ErrorAction SilentlyContinue
-                            }
-                            if ($c -eq 1 -or $c -eq 2) {
-                                $script:watchMap = @{}
-                                Remove-Item (Join-Path $PSScriptRoot 'watch-history.json') -Force -ErrorAction SilentlyContinue
-                            }
                             if ($c -ge 0 -and $c -le 2) {
-                                Build-Tabs
-                                $script:pendingNotice = 'History cleared'
+                                $what = @('RECENTLY PLAYED', 'VIDEO PLAY COUNTS', 'BOTH HISTORIES')[$c]
+                                $sure = Pick-Option "CLEAR $what - ARE YOU SURE?" @('Yes - clear it', 'Cancel')
+                                if ($sure -eq 0) {
+                                    if ($c -eq 0 -or $c -eq 2) {
+                                        $script:recentMap = @{}
+                                        Remove-Item (Join-Path $PSScriptRoot 'recent.json') -Force -ErrorAction SilentlyContinue
+                                    }
+                                    if ($c -eq 1 -or $c -eq 2) {
+                                        $script:watchMap = @{}
+                                        Remove-Item (Join-Path $PSScriptRoot 'watch-history.json') -Force -ErrorAction SilentlyContinue
+                                    }
+                                    Build-Tabs
+                                    $script:pendingNotice = 'History cleared'
+                                }
                             }
                         }
                         'Fullscreen' {
