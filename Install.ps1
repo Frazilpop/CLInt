@@ -31,7 +31,65 @@ $desktopLnk.IconLocation = "$(Join-Path $iconDir 'CLInt.ico'),0"
 $desktopLnk.Save()
 Write-Host "  Desktop shortcut created: CLInt" -ForegroundColor Green
 
-# --- 3. Optional: bind a hardware key to toggle the menu --------------
+# --- 3. First-run tab setup -------------------------------------------
+# Only on a fresh install: an existing settings.json is left untouched.
+# Everything chosen here can be changed later in the SETTINGS tab.
+$settingsPath = Join-Path $here 'settings.json'
+if (-not (Test-Path $settingsPath)) {
+    Write-Host ""
+    Write-Host "  Let's set up your tabs (all changeable later in SETTINGS)." -ForegroundColor Cyan
+    $tabs = @()
+
+    $steamAns = Read-Host "  Include a Steam games tab? [Y/n]"
+    if ($steamAns -notmatch '^[nN]') { $tabs += @{ Type = 'Steam' } }
+
+    $shortDef = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts'
+    $shortAns = Read-Host "  Folder for a game/app shortcuts tab [Enter = $shortDef, '-' = skip]"
+    if ($shortAns -ne '-') {
+        $p = if ($shortAns) { $shortAns } else { $shortDef }
+        if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force $p | Out-Null }
+        $tabs += @{ Type = 'Shortcuts'; Path = $p }
+    }
+
+    $vidDef = [Environment]::GetFolderPath('MyVideos')
+    $vidAns = Read-Host "  Folder for a videos/files tab [Enter = $vidDef, '-' = skip]"
+    if ($vidAns -ne '-') {
+        $tabs += @{ Type = 'Files'; Path = $(if ($vidAns) { $vidAns } else { $vidDef }) }
+    }
+
+    @{ Tabs = $tabs } | ConvertTo-Json -Depth 5 | Set-Content $settingsPath -Encoding utf8
+    Write-Host "  Tabs saved: $($tabs.Count) configured." -ForegroundColor Green
+} else {
+    Write-Host "  Existing settings.json found - keeping your current tabs." -ForegroundColor Green
+}
+
+# --- 4. VLC (optional, recommended) -----------------------------------
+$vlcFound = $null
+try {
+    $rp = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe' -ErrorAction SilentlyContinue).'(default)'
+    if ($rp -and (Test-Path $rp)) { $vlcFound = $rp }
+} catch {}
+if (-not $vlcFound) {
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "$env:LOCALAPPDATA\Programs")) {
+        if ($base -and (Test-Path (Join-Path $base 'VideoLAN\VLC\vlc.exe'))) { $vlcFound = Join-Path $base 'VideoLAN\VLC\vlc.exe'; break }
+    }
+}
+if ($vlcFound) {
+    Write-Host "  VLC found: videos get fullscreen playback and resume markers." -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "  VLC not detected. CLInt works without it, but with VLC videos" -ForegroundColor Yellow
+    Write-Host "  play fullscreen, the menu returns when a video ends, and" -ForegroundColor Yellow
+    Write-Host "  partially-watched markers work. (videolan.org)" -ForegroundColor Yellow
+    $wantVlc = Read-Host "  Install VLC via winget now? [y/N]"
+    if ($wantVlc -match '^[yY]') {
+        try {
+            winget install --id VideoLAN.VLC --accept-source-agreements --accept-package-agreements
+        } catch {}
+    }
+}
+
+# --- 5. Optional: bind a hardware key to toggle the menu --------------
 # Entirely skippable - the desktop shortcut is a complete install on its
 # own. The binding needs AutoHotkey v2 (tiny, free), because a global
 # hotkey has to live in something that's always running.
