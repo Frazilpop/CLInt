@@ -107,8 +107,10 @@ function Get-NonSteamGames {
 #   { "Type": "Steam" }                          - the Steam library
 #   { "Type": "Shortcuts", "Path": "..." }       - .lnk shortcuts in a folder
 #   { "Type": "Files",     "Path": "..." }       - file browser (videos via VLC)
-# in display order; a SETTINGS tab is always appended. An optional "Name"
-# overrides the auto-derived tab title (hand-edit the JSON for that).
+# in display order; a SETTINGS tab is always appended. Optional per-tab
+# fields (both settable in-app): "Name" overrides the auto-derived title,
+# "Icon" picks a mascot from the catalog. A top-level "Theme" selects the
+# color theme.
 $settingsFile = Join-Path $PSScriptRoot 'settings.json'
 $settings = @{}
 if (Test-Path $settingsFile) {
@@ -318,10 +320,12 @@ try {
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
 } catch {}
 
-# One mascot per tab type: rocket = Steam launches, handheld = shortcuts
-# on this machine, VHS = files/videos, robot = settings.
-$logoArt = @{
-    Steam = @(
+# The mascot catalog. Every tab shows one of these; a tab's icon can be
+# chosen in SETTINGS (stored as "Icon": "<name>" in settings.json) or is
+# auto-assigned: the classic face for the first tab of its type, then the
+# first unused face from the pool. 'robot' is reserved for SETTINGS.
+$mascots = [ordered]@{
+    rocket = @(
     '    /\'
     '   /##\'
     '  / o o \'
@@ -329,7 +333,7 @@ $logoArt = @{
     ' /|#####|\'
     '   ^^ ^^'
     )
-    Shortcuts = @(
+    handheld = @(
     '.---------.'
     '| .-----. |'
     '|+| o o |b|'
@@ -337,14 +341,53 @@ $logoArt = @{
     '| ''-----'' |'
     '''---------'''
     )
-    Files = @(
+    vhs = @(
     '.----------.'
     '| (o)  (o) |'
     '|   \__/   |'
     '| [======] |'
     '''----------'''
     )
-    Settings = @(
+    alien = @(
+    '    \|/'
+    '   .---.'
+    '  / o o \'
+    '  | \_/ |'
+    '   \___/'
+    )
+    ufo = @(
+    '     ___'
+    '   /o o o\'
+    '   \  -  /'
+    '  /=======\'
+    '   ~ ~ ~ ~'
+    )
+    cat = @(
+    '   /\___/\'
+    '  ( o   o )'
+    '  (  \_/  )'
+    '   -------'
+    )
+    ghost = @(
+    '   .---.'
+    '  / o o \'
+    '  | \_/ |'
+    '  |/\/\/|'
+    )
+    slime = @(
+    '     ____'
+    '   /      \'
+    '  |  o  o  |'
+    '  |  \__/  |'
+    '   \______/'
+    )
+    planet = @(
+    '      ___'
+    '    / o o \'
+    ' --(  \_/  )--'
+    '     \___/'
+    )
+    robot = @(
     '    ___'
     '  .[___].'
     '  | o o |'
@@ -352,38 +395,20 @@ $logoArt = @{
     '  ''-----'''
     )
 }
+$typeMascot   = @{ Steam = 'rocket'; Shortcuts = 'handheld'; Files = 'vhs'; Settings = 'robot' }
+$extraMascots = @('alien', 'ufo', 'cat', 'ghost', 'slime', 'planet')
 
-# Extra mascots for additional tabs: the first tab of each type keeps its
-# classic mascot above; every further tab of an already-seen type gets one
-# of these smiley faces instead (assigned in order, cycling if needed).
-$extraArt = @(
-    @(
-    '    \|/'
-    '   .---.'
-    '  / o o \'
-    '  | \_/ |'
-    '   \___/'
-    ),
-    @(
-    '     ___'
-    '   /o o o\'
-    '   \  -  /'
-    '  /=======\'
-    '   ~ ~ ~ ~'
-    ),
-    @(
-    '   /\___/\'
-    '  ( o   o )'
-    '  (  \_/  )'
-    '   -------'
-    ),
-    @(
-    '   .---.'
-    '  / o o \'
-    '  | \_/ |'
-    '  |/\/\/|'
-    )
-)
+# Color themes: every drawing call reads $theme, so switching is instant.
+# Selected in SETTINGS, stored as "Theme" in settings.json.
+$themes = [ordered]@{
+    classic = @{ Accent = 'Cyan';    Logo = 'Magenta';    Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkMagenta'; SelFg = 'Black' }
+    vapor   = @{ Accent = 'Magenta'; Logo = 'Cyan';       Info = 'DarkMagenta'; Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkCyan';    SelFg = 'Black' }
+    matrix  = @{ Accent = 'Green';   Logo = 'DarkGreen';  Info = 'DarkGreen';   Hint = 'DarkGray'; Text = 'Gray'; Bright = 'Green';  Notice = 'Yellow'; Scroll = 'DarkGreen';   SelFg = 'Black' }
+    amber   = @{ Accent = 'Yellow';  Logo = 'DarkYellow'; Info = 'DarkYellow';  Hint = 'DarkGray'; Text = 'Gray'; Bright = 'Yellow'; Notice = 'Red';    Scroll = 'DarkYellow';  SelFg = 'Black' }
+    arctic  = @{ Accent = 'White';   Logo = 'Cyan';       Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkCyan';    SelFg = 'Black' }
+}
+$themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
+$theme = $themes[$themeName]
 
 # Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
 # column 15 and each named tab takes roughly 15-16 columns, so ~8 content
@@ -443,21 +468,29 @@ function New-TabState($cfg) {
 
 function Build-Tabs {
     $script:tabs = @()
-    $seenType = @{}
-    $extraIdx = 0
+    $used = @{}
+    # Hand-picked icons claim their mascot first, so auto-assignment
+    # steers the remaining tabs around them.
+    foreach ($cfg in $settings['Tabs']) {
+        if ($cfg.Icon -and $mascots.Contains([string]$cfg.Icon)) { $used[[string]$cfg.Icon] = $true }
+    }
     foreach ($cfg in $settings['Tabs']) {
         $t = New-TabState $cfg
-        if ($seenType[$t.Type]) {
-            $t.Logo = $extraArt[$extraIdx % $extraArt.Count]
-            $extraIdx++
+        if ($cfg.Icon -and $mascots.Contains([string]$cfg.Icon)) {
+            $t.Icon = [string]$cfg.Icon
         } else {
-            $t.Logo = $logoArt[$t.Type]
-            $seenType[$t.Type] = $true
+            $classic = $typeMascot[$t.Type]
+            $t.Icon = if (-not $used[$classic]) { $classic }
+                      else { @($extraMascots | Where-Object { -not $used[$_] })[0] }
+            if (-not $t.Icon) { $t.Icon = $classic }   # every face taken: reuse the classic
+            $used[$t.Icon] = $true
         }
+        $t.Logo = $mascots[$t.Icon]
         $script:tabs += $t
     }
     $st = New-TabState @{ Type = 'Settings' }
-    $st.Logo = $logoArt['Settings']
+    $st.Icon = 'robot'
+    $st.Logo = $mascots['robot']
     $script:tabs += $st
 }
 Build-Tabs
@@ -479,6 +512,8 @@ function Get-SettingsItems {
                                     Name = ("Tab $($i + 1): $($tabs[$i].Name)".PadRight(30) + $desc) }
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
+    $list += [pscustomobject]@{ Key = 'Theme'
+                                Name = ('Color theme'.PadRight(30) + $script:themeName) }
     $list += [pscustomobject]@{ Key = 'Update'
                                 Name = ('Check for updates'.PadRight(30) + "current: v$appVersion") }
     return $list
@@ -573,9 +608,9 @@ function Draw-GameLine([int]$i) {
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
     }
     if ($i -eq $selected) {
-        Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) 'Black' 'Cyan'
+        Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) $theme.SelFg $theme.Accent
     } else {
-        $fg = if ($type -eq 'Files' -and $items[$i].Type -ne 'File') { 'White' } else { 'Gray' }
+        $fg = if ($type -eq 'Files' -and $items[$i].Type -ne 'File') { $theme.Bright } else { $theme.Text }
         Write-At 1 $y (Pad ("     " + $label + "  ") $lineW) $fg
     }
 }
@@ -583,12 +618,12 @@ function Draw-GameLine([int]$i) {
 $noticeShown = $false
 $pendingNotice = $null   # set by modals; shown after the next full redraw
 function Show-Notice([string]$text) {
-    Write-At 15 4 (Pad $text ($W - 16)) 'Yellow'
+    Write-At 15 4 (Pad $text ($W - 16)) $theme.Notice
     $script:noticeShown = $true
 }
 function Clear-Notice {
     if ($script:noticeShown) {
-        Write-At 15 4 (' ' * ($W - 16)) 'Gray'
+        Write-At 15 4 (' ' * ($W - 16)) $theme.Text
         $script:noticeShown = $false
     }
 }
@@ -598,16 +633,16 @@ function Draw-All {
     Get-Layout
     $script:noticeShown = $false
     $cur = $tabs[$tab]
-    $logo = if ($cur.Logo) { $cur.Logo } else { $logoArt[$cur.Type] }
+    $logo = if ($cur.Logo) { $cur.Logo } else { $mascots[$typeMascot[$cur.Type]] }
     for ($i = 0; $i -lt $logo.Count; $i++) {
-        Write-At 2 $i $logo[$i] 'Magenta'
+        Write-At 2 $i $logo[$i] $theme.Logo
     }
     $x = 15
     for ($t = 0; $t -lt $tabs.Count; $t++) {
         $txt = "  $($tabs[$t].Name)  "
         if ($x + $txt.Length -ge $W) { break }   # more tabs than fit: clip the bar
-        if ($t -eq $tab) { Write-At $x 0 $txt 'Black' 'Cyan' }
-        else             { Write-At $x 0 $txt 'DarkGray' }
+        if ($t -eq $tab) { Write-At $x 0 $txt $theme.SelFg $theme.Accent }
+        else             { Write-At $x 0 $txt $theme.Hint }
         $x += $txt.Length + 2
     }
     $count = switch ($cur.Type) {
@@ -616,16 +651,16 @@ function Draw-All {
         'Files'     { Pad "$($cur.Dir)  ($($items.Count) items)" ($W - 16) }
         'Settings'  { 'settings are saved automatically' }
     }
-    Write-At 15 1 $count 'DarkCyan'
+    Write-At 15 1 $count $theme.Info
     $help = if ($cur.Type -eq 'Settings') { "[ D-pad: move    </>: switch tab    A: change    B: quit ]" }
             elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
-    Write-At 15 3 $help 'DarkGray'
+    Write-At 15 3 $help $theme.Hint
     $ver = "v$appVersion"
     [Console]::SetCursorPosition($W - $ver.Length - 2, $H - 1)
     if ($script:vtOn) { [Console]::Write("$([char]27)[38;2;55;55;55m$ver$([char]27)[0m") }
-    else              { Write-Host $ver -ForegroundColor DarkGray -NoNewline }
-    if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' 'DarkGray' }
+    else              { Write-Host $ver -ForegroundColor $theme.Hint -NoNewline }
+    if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' $theme.Hint }
     Draw-List
 }
 
@@ -638,13 +673,13 @@ function Draw-List {
         Draw-GameLine $i
     }
     for ($y = $listTop + [Math]::Max(0, $items.Count - $offset); $y -lt $listTop + $visible; $y++) {
-        Write-At 1 $y (' ' * ($W - 3)) 'Gray'
+        Write-At 1 $y (' ' * ($W - 3)) $theme.Text
     }
-    Write-At ($W - 2) $listTop ' ' 'Gray'
-    Write-At ($W - 2) ($listTop + $visible - 1) ' ' 'Gray'
+    Write-At ($W - 2) $listTop ' ' $theme.Text
+    Write-At ($W - 2) ($listTop + $visible - 1) ' ' $theme.Text
     # scroll indicators
-    if ($offset -gt 0)                       { Write-At ($W - 8) $listTop '/\ more' 'DarkMagenta' }
-    if ($offset + $visible -lt $items.Count) { Write-At ($W - 8) ($listTop + $visible - 1) '\/ more' 'DarkMagenta' }
+    if ($offset -gt 0)                       { Write-At ($W - 8) $listTop '/\ more' $theme.Scroll }
+    if ($offset + $visible -lt $items.Count) { Write-At ($W - 8) ($listTop + $visible - 1) '\/ more' $theme.Scroll }
 }
 
 # --- Native gamepad input (XInput) -------------------------------------
@@ -772,9 +807,9 @@ function Pick-Folder([string]$label, [string]$start) {
             if ($sel -ge $entries.Count) { $sel = [Math]::Max(0, $entries.Count - 1) }
             $needList = $false
         }
-        Write-At 2 0 (Pad "CHOOSE FOLDER  --  $label" ($W - 4)) 'Cyan'
-        Write-At 2 1 (Pad ("Now: " + $(if ($dir) { $dir } else { 'select a drive' })) ($W - 4)) 'DarkCyan'
-        Write-At 2 3 '[ D-pad: move    A: open / choose    B: up / cancel ]' 'DarkGray'
+        Write-At 2 0 (Pad "CHOOSE FOLDER  --  $label" ($W - 4)) $theme.Accent
+        Write-At 2 1 (Pad ("Now: " + $(if ($dir) { $dir } else { 'select a drive' })) ($W - 4)) $theme.Info
+        Write-At 2 3 '[ D-pad: move    A: open / choose    B: up / cancel ]' $theme.Hint
         $top = 5
         $rows = [Math]::Max(1, $H - $top - 1)
         if ($sel -lt $off) { $off = $sel }
@@ -787,10 +822,10 @@ function Pick-Folder([string]$label, [string]$start) {
         for ($r = 0; $r -lt $rows; $r++) {
             $i = $off + $r
             if ($i -lt $entries.Count) {
-                if ($i -eq $sel) { Write-At 1 ($top + $r) (Pad ('  >> ' + $entries[$i].Name + '  ') $rowW) 'Black' 'Cyan' }
-                else             { Write-At 1 ($top + $r) (Pad ('     ' + $entries[$i].Name + '  ') $rowW) 'Gray' }
+                if ($i -eq $sel) { Write-At 1 ($top + $r) (Pad ('  >> ' + $entries[$i].Name + '  ') $rowW) $theme.SelFg $theme.Accent }
+                else             { Write-At 1 ($top + $r) (Pad ('     ' + $entries[$i].Name + '  ') $rowW) $theme.Text }
             } else {
-                Write-At 1 ($top + $r) (' ' * $rowW) 'Gray'
+                Write-At 1 ($top + $r) (' ' * $rowW) $theme.Text
             }
         }
         $key = Read-InputKey
@@ -826,11 +861,11 @@ function Pick-Option([string]$title, [string[]]$options) {
     Clear-Host
     Get-Layout
     while ($true) {
-        Write-At 2 0 (Pad $title ($W - 4)) 'Cyan'
-        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' 'DarkGray'
+        Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' $theme.Hint
         for ($i = 0; $i -lt $options.Count; $i++) {
-            if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $options[$i] + '  ') ($W - 3)) 'Black' 'Cyan' }
-            else             { Write-At 1 (4 + $i) (Pad ('     ' + $options[$i] + '  ') ($W - 3)) 'Gray' }
+            if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $options[$i] + '  ') ($W - 3)) $theme.SelFg $theme.Accent }
+            else             { Write-At 1 (4 + $i) (Pad ('     ' + $options[$i] + '  ') ($W - 3)) $theme.Text }
         }
         switch (Read-InputKey) {
             'UpArrow'   { $sel = ($sel - 1 + $options.Count) % $options.Count }
@@ -842,17 +877,48 @@ function Pick-Option([string]$title, [string[]]$options) {
     }
 }
 
+# Icon picker: mascot list on the left, live art preview on the right.
+# Returns a mascot name, '::auto' for automatic assignment, $null on cancel.
+function Pick-Mascot([string]$title, [string]$current) {
+    $names = @($mascots.Keys | Where-Object { $_ -ne 'robot' })   # robot belongs to SETTINGS
+    $entries = @('(automatic)') + $names
+    $sel = [Math]::Max(0, [array]::IndexOf($entries, $current))
+    Clear-Host
+    Get-Layout
+    while ($true) {
+        Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' $theme.Hint
+        for ($i = 0; $i -lt $entries.Count; $i++) {
+            $label = $entries[$i] + $(if ($entries[$i] -eq $current) { '  (current)' } else { '' })
+            if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $label + '  ') 30) $theme.SelFg $theme.Accent }
+            else             { Write-At 1 (4 + $i) (Pad ('     ' + $label + '  ') 30) $theme.Text }
+        }
+        $art = if ($sel -gt 0) { $mascots[$entries[$sel]] } else { $null }
+        for ($r = 0; $r -lt 7; $r++) {
+            $line = if ($art -and $r -lt $art.Count) { $art[$r] } else { '' }
+            Write-At 36 (4 + $r) (Pad $line 24) $theme.Logo
+        }
+        switch (Read-InputKey) {
+            'UpArrow'   { $sel = ($sel - 1 + $entries.Count) % $entries.Count }
+            'DownArrow' { $sel = ($sel + 1) % $entries.Count }
+            'Enter'     { if ($sel -eq 0) { return '::auto' } else { return $entries[$sel] } }
+            'Escape'    { return $null }
+            'Q'         { return $null }
+        }
+    }
+}
+
 # Modal text prompt: type on the keyboard, Enter/A saves, Esc/B cancels.
 # Returns the text, or $null if cancelled. An empty result means "no
 # override" - callers treat it as "back to the automatic value".
 function Read-TextInput([string]$title, [string]$current) {
     Clear-Host
     Get-Layout
-    Write-At 2 0 (Pad $title ($W - 4)) 'Cyan'
-    Write-At 2 2 '[ type on the keyboard    Enter/A: save    Esc/B: cancel    empty: automatic name ]' 'DarkGray'
+    Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+    Write-At 2 2 '[ type on the keyboard    Enter/A: save    Esc/B: cancel    empty: automatic name ]' $theme.Hint
     $text = $current
     while ($true) {
-        Write-At 2 4 (Pad ('> ' + $text + '_') ($W - 4)) 'White'
+        Write-At 2 4 (Pad ('> ' + $text + '_') ($W - 4)) $theme.Bright
         if ([Console]::KeyAvailable) {
             $k = [Console]::ReadKey($true)
             switch ($k.Key) {
@@ -875,7 +941,7 @@ function Edit-TabConfig([int]$i) {
     $cfg = $settings['Tabs'][$i]
     $opts = @()
     if ($cfg.Type -ne 'Steam') { $opts += 'Change folder' }
-    $opts += @('Rename tab', 'Move left', 'Move right', 'Remove tab', 'Cancel')
+    $opts += @('Rename tab', 'Change icon', 'Move left', 'Move right', 'Remove tab', 'Cancel')
     $choice = Pick-Option "TAB $($i + 1): $($tabs[$i].Name)" $opts
     if ($choice -lt 0) { return }
     switch ($opts[$choice]) {
@@ -889,6 +955,11 @@ function Edit-TabConfig([int]$i) {
                 $n = $n.Trim()
                 if ($n) { $cfg.Name = $n } else { $cfg.Remove('Name') }   # empty = automatic
             }
+        }
+        'Change icon' {
+            $m = Pick-Mascot "ICON FOR: $($tabs[$i].Name)" $tabs[$i].Icon
+            if ($m -eq '::auto') { $cfg.Remove('Icon') }
+            elseif ($m)          { $cfg.Icon = $m }
         }
         'Move left' {
             if ($i -gt 0) {
@@ -1022,10 +1093,20 @@ try {
                     switch ($s.Key) {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
+                        'Theme'  {
+                            $names = @($themes.Keys)
+                            $c = Pick-Option 'COLOR THEME' ($names + @('Cancel'))
+                            if ($c -ge 0 -and $c -lt $names.Count) {
+                                $script:themeName = $names[$c]
+                                $script:theme     = $themes[$script:themeName]
+                                $settings['Theme'] = $script:themeName
+                                Save-Settings
+                            }
+                        }
                         'Update' {
                             Clear-Host
                             Write-Host ""
-                            Write-Host "   CHECKING FOR UPDATES..." -ForegroundColor Cyan
+                            Write-Host "   CHECKING FOR UPDATES..." -ForegroundColor $theme.Accent
                             Write-Host ""
                             powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Update.ps1')
                             if ($LASTEXITCODE -eq 0) {
@@ -1041,7 +1122,7 @@ try {
                                 exit 0
                             }
                             Write-Host ""
-                            Write-Host "   press any button to go back" -ForegroundColor DarkGray
+                            Write-Host "   press any button to go back" -ForegroundColor $theme.Hint
                             Read-InputKey | Out-Null
                         }
                     }
@@ -1061,12 +1142,12 @@ try {
                     $isVideo = [System.IO.Path]::GetExtension($v.Path) -match $videoExtRe
                     Clear-Host
                     Write-Host ""
-                    Write-Host "     _____" -ForegroundColor Cyan
-                    Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor Cyan
-                    Write-Host "    |_|___|    $($v.Name)" -ForegroundColor Magenta
+                    Write-Host "     _____" -ForegroundColor $theme.Accent
+                    Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor $theme.Accent
+                    Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
                     if ($isVideo -and (Test-Path $vlcExe)) {
-                        Write-Host "   (menu will return here when VLC closes)" -ForegroundColor DarkGray
+                        Write-Host "   (menu will return here when VLC closes)" -ForegroundColor $theme.Hint
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
                     } else {
@@ -1081,13 +1162,13 @@ try {
                 $g = $items[$selected]
                 Clear-Host
                 Write-Host ""
-                Write-Host "      _" -ForegroundColor Cyan
-                Write-Host "     /^\      LAUNCHING" -ForegroundColor Cyan
-                Write-Host "    |___|" -ForegroundColor Cyan
-                Write-Host "    |   |     $($g.Name)" -ForegroundColor Magenta
-                Write-Host "    |___|" -ForegroundColor Cyan
-                Write-Host "   /|   |\    GLHF o7" -ForegroundColor DarkCyan
-                Write-Host "    ^^^^^" -ForegroundColor DarkCyan
+                Write-Host "      _" -ForegroundColor $theme.Accent
+                Write-Host "     /^\      LAUNCHING" -ForegroundColor $theme.Accent
+                Write-Host "    |___|" -ForegroundColor $theme.Accent
+                Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
+                Write-Host "    |___|" -ForegroundColor $theme.Accent
+                Write-Host "   /|   |\    GLHF o7" -ForegroundColor $theme.Info
+                Write-Host "    ^^^^^" -ForegroundColor $theme.Info
                 Write-Host ""
                 $tdpWatts = Get-GameTdp $g
                 $prevTdp = $null
@@ -1100,11 +1181,11 @@ try {
                 if ($tdpEnabled -and $tdpWatts) {
                     $prevTdp = Get-CurrentTdp
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
-                    Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor Yellow
+                    Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
-                Write-Host "   (menu will return here when the game closes)" -ForegroundColor DarkGray
+                Write-Host "   (menu will return here when the game closes)" -ForegroundColor $theme.Hint
                 Wait-ForGameExit $g
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 # bring the menu window back to the front, drop any keys
