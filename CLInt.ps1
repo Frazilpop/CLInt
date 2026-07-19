@@ -640,7 +640,11 @@ function Draw-All {
             elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
     Write-At 15 3 $help $theme.Hint
-    if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' $theme.Hint }
+    if ($items.Count -eq 0) {
+        $msg = if ($cur.Type -eq 'Shortcuts') { 'No .lnk shortcuts in this folder - press A to choose another folder or remove this tab.' }
+               else { 'Nothing found here.' }
+        Write-At 6 $listTop (Pad $msg ($W - 8)) $theme.Hint
+    }
     Draw-List
 }
 
@@ -693,8 +697,10 @@ public static int GetButtons() {
 $PAD_BUTTONS = @(
     @{ Mask = 0x0001; Key = [ConsoleKey]::UpArrow;    Repeat = $true  }   # d-pad up
     @{ Mask = 0x0002; Key = [ConsoleKey]::DownArrow;  Repeat = $true  }   # d-pad down
-    @{ Mask = 0x0004; Key = [ConsoleKey]::LeftArrow;  Repeat = $true  }   # d-pad left
-    @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $true  }   # d-pad right
+    # Left/right only switch tabs, so they must NOT auto-repeat: an empty
+    # tab redraws instantly, and a brief hold would repeat and skip past it.
+    @{ Mask = 0x0004; Key = [ConsoleKey]::LeftArrow;  Repeat = $false }   # d-pad left
+    @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # d-pad right
     @{ Mask = 0x1000; Key = [ConsoleKey]::Enter;      Repeat = $false }   # A = launch/open
     @{ Mask = 0x2000; Key = [ConsoleKey]::Escape;     Repeat = $false }   # B = back/quit
     @{ Mask = 0x8000; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # Y = next tab
@@ -1067,7 +1073,35 @@ try {
             'LeftArrow'  { Switch-Tab -1 }
             'RightArrow' { Switch-Tab 1 }
             'Enter'     {
-                if ($items.Count -eq 0) { break }
+                if ($items.Count -eq 0) {
+                    # An empty Shortcuts tab is almost always a wrong or
+                    # not-yet-created folder: offer to repoint or remove it.
+                    if ($cur.Type -eq 'Shortcuts' -and $tab -lt $settings['Tabs'].Count) {
+                        $cfg = $settings['Tabs'][$tab]
+                        $c = Pick-Option "THIS TAB HAS NO SHORTCUTS  --  $($cfg.Path)" @(
+                            'Choose a different folder', 'Remove this tab', 'Cancel')
+                        switch ($c) {
+                            0 {
+                                $p = Pick-Folder 'folder with .lnk shortcuts' $cfg.Path
+                                if ($p) {
+                                    $cfg.Path = $p; $cfg.Remove('Name')
+                                    Save-Settings; Build-Tabs
+                                    $script:items = @(Get-TabItems $tab)
+                                    $script:selected = 0; $script:offset = 0
+                                }
+                            }
+                            1 {
+                                $settings['Tabs'] = @($settings['Tabs'] | Where-Object { $_ -ne $cfg })
+                                Save-Settings; Build-Tabs
+                                $script:tab = [Math]::Min($tab, $tabs.Count - 1)
+                                $script:items = @(Get-TabItems $tab)
+                                $script:selected = 0; $script:offset = 0
+                            }
+                        }
+                        Draw-All
+                    }
+                    break
+                }
                 if ($cur.Type -eq 'Settings') {
                     $s = $items[$selected]
                     switch ($s.Key) {
