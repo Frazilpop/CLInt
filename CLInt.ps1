@@ -665,8 +665,8 @@ function Get-FileItems($t) {
             if ($script:videoHistEnabled -and $script:watchMap[$k]) {
                 try { $plays = [int]$script:watchMap[$k].Plays } catch {}
             }
-            # .lnk is an implementation detail - show the shortcut's name
-            $disp = if ($_.Extension -eq '.lnk') { $_.BaseName } else { $_.Name }
+            # .lnk/.url are implementation details - show the shortcut's name
+            $disp = if ($_.Extension -in '.lnk', '.url') { $_.BaseName } else { $_.Name }
             [pscustomobject]@{
                 Name = $disp; Path = $_.FullName; Type = 'File'
                 Plays = $plays; Resume = $vlcResume[$k]
