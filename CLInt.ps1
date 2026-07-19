@@ -936,9 +936,9 @@ function Draw-Status {
         $script:statusLast = $txt
         if ($script:statusDrawnLen -gt $txt.Length) {
             # a previously longer readout left characters behind: blank them
-            Write-At ($W - $script:statusDrawnLen) 0 (' ' * ($script:statusDrawnLen - $txt.Length)) $theme.Info
+            Write-At ($W - $script:statusDrawnLen - 1) 0 (' ' * ($script:statusDrawnLen - $txt.Length)) $theme.Info
         }
-        if ($txt) { Write-At ($W - $txt.Length) 0 $txt $theme.Info }   # flush to the right edge
+        if ($txt) { Write-At ($W - $txt.Length - 1) 0 $txt $theme.Info }   # one column of breathing room
         $script:statusDrawnLen = $txt.Length
     } catch {}
 }
