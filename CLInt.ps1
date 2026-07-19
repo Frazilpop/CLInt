@@ -936,7 +936,9 @@ function Edit-TabConfig([int]$i) {
             if ($p) { $cfg.Path = $p; $cfg.Remove('Name') }   # re-derive the title
         }
         'Rename tab' {
-            $n = Read-TextInput "RENAME TAB: $($tabs[$i].Name)" $(if ($cfg.Name) { [string]$cfg.Name } else { '' })
+            # Prefill with the current title (auto-derived or custom), so
+            # renaming means editing what's already there, not retyping it.
+            $n = Read-TextInput "RENAME TAB: $($tabs[$i].Name)" ([string]$tabs[$i].Name)
             if ($null -ne $n) {
                 $n = $n.Trim()
                 if ($n) { $cfg.Name = $n } else { $cfg.Remove('Name') }   # empty = automatic
