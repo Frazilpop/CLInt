@@ -6,14 +6,21 @@ point it at your libraries, press A, play.
 
 ## What it does
 
-- **STEAM GAMES** — scans Steam's appmanifest files (no network) and
-  launches via `steam://`. Non-Steam shortcuts from `shortcuts.vdf` work
-  too.
-- **LOCAL GAMES** — launches `.lnk` shortcuts from a configurable folder,
-  tracking the game by its target exe.
-- **VIDEOS** — a folder browser that plays files via VLC fullscreen.
-- **SETTINGS** — video and game-shortcut folders, picked with the gamepad,
-  persisted to `settings.json`.
+Tabs are fully configurable: add, remove, and reorder them from the
+SETTINGS tab, entirely with the gamepad. Three tab types, in any mix —
+several of the same type is fine (two shortcut folders, a videos tab
+and a recordings tab, ...):
+
+- **Steam** — scans Steam's appmanifest files (no network) and launches
+  via `steam://`. Non-Steam shortcuts from `shortcuts.vdf` included.
+- **Shortcuts** — launches `.lnk` shortcuts from a folder of your
+  choice, tracking each game by its target exe.
+- **Files** — a folder browser: videos play fullscreen via VLC,
+  anything else opens with its default app.
+
+Tab titles come from the folder names automatically (a `Name` field in
+`settings.json` overrides them, if you want to hand-edit). The SETTINGS
+tab itself is always there, so you can never lock yourself out.
 - **Per-game TDP** (only on machines with GPD Motion Assistant) — RB
   cycles default → 12W → 15W → 18W → 5W per game, applied at launch with
   Motion Assistant's bundled `ryzenadj` (works unelevated because its

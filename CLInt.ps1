@@ -1,16 +1,16 @@
 # CLInt.ps1 - fast, gamepad-driven launcher for games and videos.
-# Scans Steam's appmanifest files (no AI, no network) and launches the
-# selected game via the steam:// protocol.
+# Tabs are fully user-configurable (SETTINGS tab): any mix of Steam
+# library tabs, shortcut-folder tabs, and file-browser tabs.
 #
-# Usage:  games          (interactive menu: arrows/D-pad to move, Enter/A to launch)
-#         games -List    (just print the games, no menu)
+# Usage:  CLInt.ps1          (interactive menu: arrows/D-pad to move, Enter/A to launch)
+#         CLInt.ps1 -List    (just print the Steam games, no menu)
 
 param([switch]$List)
 
 $ErrorActionPreference = 'Stop'
 
 # Single instance: whichever way a second copy gets started (desktop
-# shortcut, AppsKey via CLIntKey.ahk, direct run), it defers to the
+# shortcut, hotkey via CLIntKey.ahk, direct run), it defers to the
 # running one - focus it, or minimize it if it's frontmost - and exits.
 if (-not $List) {
     $script:instanceMutex = New-Object System.Threading.Mutex($false, 'Local\CLIntMenu')
@@ -40,6 +40,11 @@ if (-not $List) {
 
 $Host.UI.RawUI.WindowTitle = 'CLInt'   # matched by Launch.ps1, CLIntKey.ahk and claude-gamepad.ahk
 
+# App version: version.txt ships with the code and is bumped on every
+# update, so the in-app corner display and the updater can compare.
+$appVersion = try { (Get-Content (Join-Path $PSScriptRoot 'version.txt') -TotalCount 1).Trim() } catch { '?' }
+
+# ------------------------------------------------------------- Steam ---
 function Get-SteamPath {
     $p = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue).SteamPath
     if (-not $p) { $p = (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam" -ErrorAction SilentlyContinue).InstallPath }
@@ -97,33 +102,57 @@ function Get-NonSteamGames {
     return @($found | Sort-Object Name)
 }
 
-$games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name)
-if ($games.Count -eq 0) { Write-Host "No installed Steam games found."; exit 1 }
-
-# App version: version.txt ships with the code and is bumped on every
-# update, so the in-app corner display and the updater can compare.
-$appVersion = try { (Get-Content (Join-Path $PSScriptRoot 'version.txt') -TotalCount 1).Trim() } catch { '?' }
-
 # ----------------------------------------------------------- Settings ---
-# User-configurable folders, editable from the SETTINGS tab in the app.
+# settings.json holds the tab configuration: an array of
+#   { "Type": "Steam" }                          - the Steam library
+#   { "Type": "Shortcuts", "Path": "..." }       - .lnk shortcuts in a folder
+#   { "Type": "Files",     "Path": "..." }       - file browser (videos via VLC)
+# in display order; a SETTINGS tab is always appended. An optional "Name"
+# overrides the auto-derived tab title (hand-edit the JSON for that).
 $settingsFile = Join-Path $PSScriptRoot 'settings.json'
-$settings = @{
-    VideoRoot        = 'D:\Videos'
-    LocalShortcutDir = 'C:\Users\frazi\Desktop\Game Shortcuts'
-}
+$settings = @{}
 if (Test-Path $settingsFile) {
     (Get-Content $settingsFile -Raw | ConvertFrom-Json).PSObject.Properties |
         ForEach-Object { $settings[$_.Name] = $_.Value }
 }
+if (-not $settings.ContainsKey('Tabs')) {
+    # First run - or migration from the fixed-tab era's two folder keys.
+    # (Key-existence check, not truthiness: an empty Tabs array is a valid
+    # deliberate config - all tabs removed - and must not resurrect defaults.)
+    $shortcutDir = if ($settings['LocalShortcutDir']) { $settings['LocalShortcutDir'] }
+                   else { Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts' }
+    $filesDir    = if ($settings['VideoRoot']) { $settings['VideoRoot'] }
+                   else { [Environment]::GetFolderPath('MyVideos') }
+    $settings['Tabs'] = @(
+        @{ Type = 'Steam' }
+        @{ Type = 'Shortcuts'; Path = $shortcutDir }
+        @{ Type = 'Files';     Path = $filesDir }
+    )
+}
+$settings.Remove('LocalShortcutDir'); $settings.Remove('VideoRoot')
+# JSON round-trips tab entries as PSCustomObjects; normalize to hashtables.
+$settings['Tabs'] = @($settings['Tabs'] | ForEach-Object {
+    if ($_ -is [hashtable]) { $_ }
+    else { $t = @{}; $_.PSObject.Properties | ForEach-Object { $t[$_.Name] = $_.Value }; $t }
+})
+
 function Save-Settings {
-    $settings | ConvertTo-Json | Set-Content $settingsFile -Encoding utf8
+    $settings | ConvertTo-Json -Depth 5 | Set-Content $settingsFile -Encoding utf8
 }
 
-# Local (non-Steam-managed) games: .lnk shortcuts collected in one folder.
-# Launched via the shortcut itself; game exit is tracked by the target exe.
-function Get-LocalGames {
+# The Steam library is only scanned when a Steam tab is configured (or for
+# -List); machines without Steam just don't get Steam tabs.
+$games = @()
+$needSteam = $List -or @($settings['Tabs'] | Where-Object { $_.Type -eq 'Steam' }).Count -gt 0
+if ($needSteam) {
+    try { $games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name) } catch {}
+}
+
+# Shortcut-folder tabs: .lnk files collected in one folder, launched via
+# the shortcut itself; exit is tracked by the target exe.
+function Get-ShortcutGames([string]$dir) {
     $wsh = New-Object -ComObject WScript.Shell
-    @(Get-ChildItem (Join-Path $settings.LocalShortcutDir '*.lnk') -ErrorAction SilentlyContinue |
+    @(Get-ChildItem (Join-Path $dir '*.lnk') -ErrorAction SilentlyContinue |
         Sort-Object BaseName | ForEach-Object {
             [pscustomobject]@{
                 Name  = $_.BaseName
@@ -134,7 +163,6 @@ function Get-LocalGames {
             }
         })
 }
-$localGames = @()   # filled by Update-LocalGames once MA profiles are known
 
 # ---------------------------------------------------------------- TDP ---
 # Per-game TDP override, applied through the same ryzenadj.exe that GPD's
@@ -208,13 +236,8 @@ function Add-MaProfileTags($list) {
 }
 Add-MaProfileTags $games
 
-function Update-LocalGames {
-    $script:localGames = @(Get-LocalGames)
-    Add-MaProfileTags $script:localGames
-}
-Update-LocalGames
-
 if ($List) {
+    if ($games.Count -eq 0) { Write-Host "No installed Steam games found."; exit 1 }
     $games |
         Select-Object Name, AppId, @{n='TDP'; e={ $w = Get-GameTdp $_; if ($w) { "$($w)W" } }}, MaProfile |
         Format-Table -AutoSize
@@ -264,136 +287,191 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
     } catch {}
 }
 
-# One mascot per tab: rocket = Steam launches, handheld = local games on
-# this machine, VHS = videos.
-$logos = @(
-    @(
+# VT (24-bit color) for the corner version badge only: the 16-color console
+# palette has nothing between DarkGray and invisible, so paint it a
+# near-black gray via an escape sequence when conhost allows it.
+$script:vtOn = $false
+try {
+    Add-Type -Namespace CLIntVT -Name Con -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+    $vtH = [CLIntVT.Con]::GetStdHandle(-11); $vtM = 0
+    if ([CLIntVT.Con]::GetConsoleMode($vtH, [ref]$vtM)) {
+        $script:vtOn = [CLIntVT.Con]::SetConsoleMode($vtH, $vtM -bor 4)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    }
+} catch {}
+
+# One mascot per tab type: rocket = Steam launches, handheld = shortcuts
+# on this machine, VHS = files/videos, robot = settings.
+$logoArt = @{
+    Steam = @(
     '    /\'
     '   /##\'
     '  / o o \'
     '  | \_/ |'
     ' /|#####|\'
     '   ^^ ^^'
-    ),
-    @(
+    )
+    Shortcuts = @(
     '.---------.'
     '| .-----. |'
     '|+| o o |b|'
     '| | \_/ |a|'
     '| ''-----'' |'
     '''---------'''
-    ),
-    @(
+    )
+    Files = @(
     '.----------.'
     '| (o)  (o) |'
     '|   \__/   |'
     '| [======] |'
     '''----------'''
-    ),
-    @(
+    )
+    Settings = @(
     '    ___'
     '  .[___].'
     '  | o o |'
     '  | \_/ |'
     '  ''-----'''
     )
-)
-# ------------------------------------------------------------- Videos ---
-$videoRoot  = $settings.VideoRoot
+}
+
 $vlcExe     = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
 $videoExtRe = '^\.(mp4|mkv|avi|webm|mov|m4v|wmv|mpg|mpeg|ts|flv)$'
 
-# The videos tab is a folder browser rooted at $videoRoot: '..' first (in
-# subfolders), then folders that contain at least one video somewhere below
-# (hides e.g. Subs folders), then the video files themselves.
-function Get-VideoItems([string]$dir) {
+# File-browser tabs: '..' first (in subfolders), then folders that contain
+# at least one file somewhere below, then the files themselves. Videos
+# play via VLC; anything else opens with its default app.
+function Get-FileItems($t) {
+    $dir = $t.Dir
     $list = @()
-    if ($dir -ne $videoRoot) {
+    if ($dir -ne $t.Root) {
         $list += [pscustomobject]@{ Name = '..'; Path = (Split-Path $dir -Parent); Type = 'Up' }
     }
     $list += @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
         Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -match $videoExtRe }).Count -gt 0 } |
+            Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
-    $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -match $videoExtRe } | Sort-Object Name |
+    $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName; Type = 'File' } })
     return $list
 }
 
-$videoDir   = $videoRoot
-$videoStack = New-Object System.Collections.Stack   # (dir, selected, offset) per level
-$videoItems = @(Get-VideoItems $videoRoot)
+# ---------------------------------------------------------------- Tabs ---
+# Runtime tab objects built from $settings.Tabs (+ SETTINGS appended).
+# Each carries its own items, cursor, and - for Files tabs - browse state.
+function New-TabState($cfg) {
+    $t = @{ Type = $cfg.Type; Path = $cfg.Path; Sel = 0; Off = 0 }
+    $t.Name = if ($cfg.Name) { $cfg.Name } else {
+        switch ($cfg.Type) {
+            'Steam'     { 'STEAM GAMES' }
+            'Shortcuts' { if ($cfg.Path) { (Split-Path $cfg.Path -Leaf).ToUpper() } else { 'SHORTCUTS' } }
+            'Files'     { if ($cfg.Path) { (Split-Path $cfg.Path -Leaf).ToUpper() } else { 'FILES' } }
+            'Settings'  { 'SETTINGS' }
+        }
+    }
+    switch ($cfg.Type) {
+        'Steam'     { $t.Items = $games }
+        'Shortcuts' {
+            $t.Items = @(Get-ShortcutGames $cfg.Path)
+            Add-MaProfileTags $t.Items
+        }
+        'Files'     {
+            $t.Root  = $cfg.Path
+            $t.Dir   = $cfg.Path
+            $t.Stack = New-Object System.Collections.Stack   # (dir, sel, off) per level
+            $t.Items = @(Get-FileItems $t)
+        }
+        'Settings'  { $t.Items = @() }   # built fresh by Get-TabItems
+    }
+    return $t
+}
 
-# Tabs: 0 = Steam games, 1 = local game shortcuts, 2 = video browser,
-# 3 = settings. Left/right cycles; each tab remembers its own cursor.
-$tabNames     = @('STEAM GAMES', 'LOCAL GAMES', 'VIDEOS', 'SETTINGS')
-$VIDEO_TAB    = 2
-$SETTINGS_TAB = 3
-$tab          = 0
-$tabSel       = @(0, 0, 0, 0)
-$tabOff       = @(0, 0, 0, 0)
-$items        = $games   # the list the current tab shows
+function Build-Tabs {
+    $script:tabs = @()
+    foreach ($cfg in $settings['Tabs']) { $script:tabs += New-TabState $cfg }
+    $script:tabs += New-TabState @{ Type = 'Settings' }
+}
+Build-Tabs
 
+$tab      = 0
 $selected = 0
 $offset   = 0    # first item index shown in the viewport
 
 function Get-SettingsItems {
-    @(
-        [pscustomobject]@{ Key = 'VideoRoot';        Label = 'Video folder'
-                           Name = ('Video folder'.PadRight(24) + $settings.VideoRoot) }
-        [pscustomobject]@{ Key = 'LocalShortcutDir'; Label = 'Game shortcuts folder'
-                           Name = ('Game shortcuts folder'.PadRight(24) + $settings.LocalShortcutDir) }
-        [pscustomobject]@{ Key = 'Update';           Label = 'Check for updates'
-                           Name = ('Check for updates'.PadRight(24) + "current: v$appVersion") }
-    )
+    $list = @()
+    for ($i = 0; $i -lt $settings['Tabs'].Count; $i++) {
+        $cfg = $settings['Tabs'][$i]
+        $desc = switch ($cfg.Type) {
+            'Steam'     { 'Steam library' }
+            'Shortcuts' { "shortcuts in $($cfg.Path)" }
+            'Files'     { "files in $($cfg.Path)" }
+        }
+        $list += [pscustomobject]@{ Key = 'Tab'; Index = $i
+                                    Name = ("Tab $($i + 1): $($tabs[$i].Name)".PadRight(30) + $desc) }
+    }
+    $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
+    $list += [pscustomobject]@{ Key = 'Update'
+                                Name = ('Check for updates'.PadRight(30) + "current: v$appVersion") }
+    return $list
 }
 
 function Get-TabItems([int]$t) {
-    switch ($t) {
-        0 { return $games }
-        1 { return $localGames }
-        2 { return $script:videoItems }
-        3 { return Get-SettingsItems }
-    }
+    if ($tabs[$t].Type -eq 'Settings') { return @(Get-SettingsItems) }
+    return $tabs[$t].Items
 }
 
 function Switch-Tab([int]$delta) {
-    $tabSel[$script:tab] = $script:selected
-    $tabOff[$script:tab] = $script:offset
-    $script:tab = ($script:tab + $delta + $tabNames.Count) % $tabNames.Count
+    $tabs[$script:tab].Sel = $script:selected
+    $tabs[$script:tab].Off = $script:offset
+    $script:tab = ($script:tab + $delta + $tabs.Count) % $tabs.Count
     $script:items    = @(Get-TabItems $script:tab)
-    $script:selected = $tabSel[$script:tab]
-    $script:offset   = $tabOff[$script:tab]
+    $script:selected = [Math]::Min($tabs[$script:tab].Sel, [Math]::Max(0, $script:items.Count - 1))
+    $script:offset   = $tabs[$script:tab].Off
     Draw-All
 }
 
-function Enter-VideoDir([string]$path) {
-    $videoStack.Push(@($script:videoDir, $script:selected, $script:offset))
-    $script:videoDir   = $path
-    $script:videoItems = @(Get-VideoItems $path)
-    $script:items      = $script:videoItems
+# Rebuild everything after a tab-config change and land on the SETTINGS tab.
+function Apply-TabConfig {
+    Save-Settings
+    Build-Tabs
+    $script:tab      = $tabs.Count - 1
+    $script:items    = @(Get-TabItems $script:tab)
     $script:selected = 0
     $script:offset   = 0
     Draw-All
 }
 
-# Go up one folder; returns $false when already at the root.
-function Exit-VideoDir {
-    if ($script:videoDir -eq $videoRoot) { return $false }
-    if ($videoStack.Count -gt 0) {
-        $prev = $videoStack.Pop()
-        $script:videoDir = $prev[0]; $sel = $prev[1]; $off = $prev[2]
+function Enter-FileDir($t, [string]$path) {
+    $t.Stack.Push(@($t.Dir, $script:selected, $script:offset))
+    $t.Dir   = $path
+    $t.Items = @(Get-FileItems $t)
+    $script:items    = $t.Items
+    $script:selected = 0
+    $script:offset   = 0
+    Draw-All
+}
+
+# Go up one folder; returns $false when already at the tab's root.
+function Exit-FileDir($t) {
+    if ($t.Dir -eq $t.Root) { return $false }
+    if ($t.Stack.Count -gt 0) {
+        $prev = $t.Stack.Pop()
+        $t.Dir = $prev[0]; $sel = $prev[1]; $off = $prev[2]
     } else {
-        $script:videoDir = Split-Path $script:videoDir -Parent; $sel = 0; $off = 0
+        $t.Dir = Split-Path $t.Dir -Parent; $sel = 0; $off = 0
     }
-    $script:videoItems = @(Get-VideoItems $script:videoDir)
-    $script:items      = $script:videoItems
+    $t.Items = @(Get-FileItems $t)
+    $script:items    = $t.Items
     $script:selected = [Math]::Min($sel, [Math]::Max(0, $script:items.Count - 1))
     $script:offset   = $off
     Draw-All
     return $true
 }
+
+$items = @(Get-TabItems 0)
 
 function Write-At([int]$x, [int]$y, [string]$text, $fg, $bg) {
     [Console]::SetCursorPosition($x, $y)
@@ -418,7 +496,8 @@ function Draw-GameLine([int]$i) {
     if ($i -lt $offset -or $i -ge $offset + $visible) { return }
     $w = $W - 3
     $label = $items[$i].Name
-    if ($tab -le 1) {
+    $type = $tabs[$tab].Type
+    if ($type -in 'Steam', 'Shortcuts') {
         $tdp = Get-GameTdp $items[$i]
         if ($items[$i].MaProfile) { $label += "  [MA profile]" }
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
@@ -426,7 +505,7 @@ function Draw-GameLine([int]$i) {
     if ($i -eq $selected) {
         Write-At 1 $y (Pad ("  >> " + $label + "  ") $w) 'Black' 'Cyan'
     } else {
-        $fg = if ($tab -eq $VIDEO_TAB -and $items[$i].Type -ne 'File') { 'White' } else { 'Gray' }
+        $fg = if ($type -eq 'Files' -and $items[$i].Type -ne 'File') { 'White' } else { 'Gray' }
         Write-At 1 $y (Pad ("     " + $label + "  ") $w) $fg
     }
 }
@@ -447,30 +526,34 @@ function Draw-All {
     Clear-Host
     Get-Layout
     $script:noticeShown = $false
-    $logo = $logos[$tab]
+    $cur = $tabs[$tab]
+    $logo = $logoArt[$cur.Type]
     for ($i = 0; $i -lt $logo.Count; $i++) {
         Write-At 2 $i $logo[$i] 'Magenta'
     }
     $x = 15
-    for ($t = 0; $t -lt $tabNames.Count; $t++) {
-        $txt = "  $($tabNames[$t])  "
+    for ($t = 0; $t -lt $tabs.Count; $t++) {
+        $txt = "  $($tabs[$t].Name)  "
+        if ($x + $txt.Length -ge $W) { break }   # more tabs than fit: clip the bar
         if ($t -eq $tab) { Write-At $x 0 $txt 'Black' 'Cyan' }
         else             { Write-At $x 0 $txt 'DarkGray' }
         $x += $txt.Length + 2
     }
-    $count = switch ($tab) {
-        0 { "$($games.Count) Steam games installed" }
-        1 { "$($localGames.Count) local games" }
-        2 { Pad "$videoDir  ($($items.Count) items)" ($W - 16) }
-        3 { 'settings are saved automatically' }
+    $count = switch ($cur.Type) {
+        'Steam'     { "$($items.Count) Steam games installed" }
+        'Shortcuts' { "$($items.Count) shortcuts" }
+        'Files'     { Pad "$($cur.Dir)  ($($items.Count) items)" ($W - 16) }
+        'Settings'  { 'settings are saved automatically' }
     }
     Write-At 15 1 $count 'DarkCyan'
-    $help = if ($tab -eq $SETTINGS_TAB) { "[ D-pad: move    </>: switch tab    A: change    B: quit ]" }
-            elseif ($tdpEnabled -and $tab -le 1) { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
+    $help = if ($cur.Type -eq 'Settings') { "[ D-pad: move    </>: switch tab    A: change    B: quit ]" }
+            elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
             else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
     Write-At 15 3 $help 'DarkGray'
     $ver = "v$appVersion"
-    Write-At ($W - $ver.Length - 2) ($H - 1) $ver 'DarkGray'
+    [Console]::SetCursorPosition($W - $ver.Length - 2, $H - 1)
+    if ($script:vtOn) { [Console]::Write("$([char]27)[38;2;55;55;55m$ver$([char]27)[0m") }
+    else              { Write-Host $ver -ForegroundColor DarkGray -NoNewline }
     if ($items.Count -eq 0) { Write-At 6 $listTop 'Nothing found here.' 'DarkGray' }
     Draw-List
 }
@@ -492,8 +575,6 @@ function Draw-List {
     if ($offset -gt 0)                       { Write-At ($W - 8) $listTop '/\ more' 'DarkMagenta' }
     if ($offset + $visible -lt $items.Count) { Write-At ($W - 8) ($listTop + $visible - 1) '\/ more' 'DarkMagenta' }
 }
-
-# ------------------------------------------------------ folder picker ---
 
 # --- Native gamepad input (XInput) -------------------------------------
 # The menu reads the controller directly through XInput, so no AutoHotkey
@@ -595,7 +676,7 @@ function Get-PickerEntries($dir) {
 # cancel). Returns the chosen path, or $null if cancelled.
 function Pick-Folder([string]$label, [string]$start) {
     $dir = $start
-    if (-not (Test-Path $dir)) { $dir = $env:USERPROFILE }
+    if (-not $dir -or -not (Test-Path $dir)) { $dir = $env:USERPROFILE }
     $sel = 0; $off = 0
     $entries = @()
     $needList = $true
@@ -651,17 +732,86 @@ function Pick-Folder([string]$label, [string]$start) {
     }
 }
 
-# Persist a changed folder setting and refresh the affected tab's data.
-function Apply-Setting([string]$key, [string]$path) {
-    $settings[$key] = $path
-    Save-Settings
-    if ($key -eq 'VideoRoot') {
-        $script:videoRoot  = $path
-        $script:videoDir   = $path
-        $script:videoStack.Clear()
-        $script:videoItems = @(Get-VideoItems $path)
-    } else {
-        Update-LocalGames
+# Small modal list of choices; returns the chosen index, or -1 on cancel.
+function Pick-Option([string]$title, [string[]]$options) {
+    $sel = 0
+    Clear-Host
+    Get-Layout
+    while ($true) {
+        Write-At 2 0 (Pad $title ($W - 4)) 'Cyan'
+        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' 'DarkGray'
+        for ($i = 0; $i -lt $options.Count; $i++) {
+            if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $options[$i] + '  ') ($W - 3)) 'Black' 'Cyan' }
+            else             { Write-At 1 (4 + $i) (Pad ('     ' + $options[$i] + '  ') ($W - 3)) 'Gray' }
+        }
+        switch (Read-InputKey) {
+            'UpArrow'   { $sel = ($sel - 1 + $options.Count) % $options.Count }
+            'DownArrow' { $sel = ($sel + 1) % $options.Count }
+            'Enter'     { return $sel }
+            'Escape'    { return -1 }
+            'Q'         { return -1 }
+        }
+    }
+}
+
+# SETTINGS actions on a configured tab: reorder, retarget, or remove it.
+function Edit-TabConfig([int]$i) {
+    $cfg = $settings['Tabs'][$i]
+    $opts = @()
+    if ($cfg.Type -ne 'Steam') { $opts += 'Change folder' }
+    $opts += @('Move left', 'Move right', 'Remove tab', 'Cancel')
+    $choice = Pick-Option "TAB $($i + 1): $($tabs[$i].Name)" $opts
+    if ($choice -lt 0) { return }
+    switch ($opts[$choice]) {
+        'Change folder' {
+            $p = Pick-Folder "new folder for this tab" $cfg.Path
+            if ($p) { $cfg.Path = $p; $cfg.Remove('Name') }   # re-derive the title
+        }
+        'Move left' {
+            if ($i -gt 0) {
+                $tmp = $settings['Tabs'][$i - 1]
+                $settings['Tabs'][$i - 1] = $cfg
+                $settings['Tabs'][$i] = $tmp
+            }
+        }
+        'Move right' {
+            if ($i -lt $settings['Tabs'].Count - 1) {
+                $tmp = $settings['Tabs'][$i + 1]
+                $settings['Tabs'][$i + 1] = $cfg
+                $settings['Tabs'][$i] = $tmp
+            }
+        }
+        'Remove tab' {
+            $settings['Tabs'] = @($settings['Tabs'] | Where-Object { $_ -ne $cfg })
+        }
+        'Cancel' { return }
+    }
+    Apply-TabConfig
+}
+
+function Add-TabConfig {
+    $choice = Pick-Option 'ADD A TAB' @(
+        'Steam games      - your Steam library, incl. non-Steam shortcuts',
+        'Shortcuts folder - .lnk shortcuts launched as games/apps',
+        'Files folder     - browse and play videos, open any file',
+        'Cancel')
+    switch ($choice) {
+        0 {
+            $settings['Tabs'] += @{ Type = 'Steam' }
+            if ($games.Count -eq 0) {
+                try { $script:games = @(@(Get-InstalledGames) + @(Get-NonSteamGames) | Sort-Object Name) } catch {}
+                Add-MaProfileTags $games
+            }
+            Apply-TabConfig
+        }
+        1 {
+            $p = Pick-Folder 'folder with .lnk shortcuts' ([Environment]::GetFolderPath('Desktop'))
+            if ($p) { $settings['Tabs'] += @{ Type = 'Shortcuts'; Path = $p }; Apply-TabConfig }
+        }
+        2 {
+            $p = Pick-Folder 'folder to browse' ([Environment]::GetFolderPath('MyVideos'))
+            if ($p) { $settings['Tabs'] += @{ Type = 'Files'; Path = $p }; Apply-TabConfig }
+        }
     }
 }
 
@@ -719,6 +869,7 @@ try {
     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
     while ($true) {
         $key = Read-InputKey
+        $cur = $tabs[$tab]
         switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
@@ -728,54 +879,56 @@ try {
             'RightArrow' { Switch-Tab 1 }
             'Enter'     {
                 if ($items.Count -eq 0) { break }
-                if ($tab -eq $SETTINGS_TAB) {
+                if ($cur.Type -eq 'Settings') {
                     $s = $items[$selected]
-                    if ($s.Key -eq 'Update') {
-                        Clear-Host
-                        Write-Host ""
-                        Write-Host "   CHECKING FOR UPDATES..." -ForegroundColor Cyan
-                        Write-Host ""
-                        powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Update.ps1')
-                        if ($LASTEXITCODE -eq 0) {
+                    switch ($s.Key) {
+                        'Tab'    { Edit-TabConfig $s.Index }
+                        'AddTab' { Add-TabConfig }
+                        'Update' {
+                            Clear-Host
                             Write-Host ""
-                            Write-Host "   Updated - restarting the menu..." -ForegroundColor Green
-                            Start-Sleep -Seconds 2
-                            if ($script:instanceMutex) {
-                                try { $script:instanceMutex.ReleaseMutex() } catch {}
-                                $script:instanceMutex.Dispose()
+                            Write-Host "   CHECKING FOR UPDATES..." -ForegroundColor Cyan
+                            Write-Host ""
+                            powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Update.ps1')
+                            if ($LASTEXITCODE -eq 0) {
+                                Write-Host ""
+                                Write-Host "   Updated - restarting the menu..." -ForegroundColor Green
+                                Start-Sleep -Seconds 2
+                                if ($script:instanceMutex) {
+                                    try { $script:instanceMutex.ReleaseMutex() } catch {}
+                                    $script:instanceMutex.Dispose()
+                                }
+                                Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
+                                    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""
+                                exit 0
                             }
-                            Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
-                                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\CLInt.ps1`""
-                            exit 0
+                            Write-Host ""
+                            Write-Host "   press any button to go back" -ForegroundColor DarkGray
+                            Read-InputKey | Out-Null
                         }
-                        Write-Host ""
-                        Write-Host "   press any button to go back" -ForegroundColor DarkGray
-                        Read-InputKey | Out-Null
-                        Draw-All
-                        break
                     }
-                    $picked = Pick-Folder $s.Label $settings[$s.Key]
-                    if ($picked) { Apply-Setting $s.Key $picked }
-                    $script:items = @(Get-TabItems $tab)
+                    $script:items    = @(Get-TabItems $tab)
+                    $script:selected = [Math]::Min($selected, [Math]::Max(0, $items.Count - 1))
                     Draw-All
                     break
                 }
-                if ($tab -eq $VIDEO_TAB) {
+                if ($cur.Type -eq 'Files') {
                     $v = $items[$selected]
-                    if ($v.Type -eq 'Dir') { Enter-VideoDir $v.Path; break }
-                    if ($v.Type -eq 'Up')  { Exit-VideoDir | Out-Null; break }
+                    if ($v.Type -eq 'Dir') { Enter-FileDir $cur $v.Path; break }
+                    if ($v.Type -eq 'Up')  { Exit-FileDir $cur | Out-Null; break }
+                    $isVideo = [System.IO.Path]::GetExtension($v.Path) -match $videoExtRe
                     Clear-Host
                     Write-Host ""
                     Write-Host "     _____" -ForegroundColor Cyan
                     Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor Cyan
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor Magenta
                     Write-Host ""
-                    Write-Host "   (menu will return here when VLC closes)" -ForegroundColor DarkGray
-                    if (Test-Path $vlcExe) {
+                    if ($isVideo -and (Test-Path $vlcExe)) {
+                        Write-Host "   (menu will return here when VLC closes)" -ForegroundColor DarkGray
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
                     } else {
-                        Start-Process $v.Path   # no VLC: default player, untrackable
+                        Start-Process $v.Path   # default app for this file type
                         Start-Sleep -Seconds 5
                     }
                     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
@@ -807,8 +960,8 @@ try {
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
                     Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor Yellow
                 }
-                if ($tab -eq 1) { Start-Process $g.Path }   # local game: run its shortcut
-                else            { Start-Process "steam://rungameid/$($g.LaunchId)" }
+                if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
+                else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
                 Write-Host "   (menu will return here when the game closes)" -ForegroundColor DarkGray
                 Wait-ForGameExit $g
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
@@ -819,8 +972,8 @@ try {
                 Draw-All
             }
             'F5'        {   # RB on the gamepad (read natively via XInput)
-                if ($tdpEnabled -and $tab -le 1 -and $items.Count -gt 0) {
-                    $g = $games[$selected]
+                if ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts' -and $items.Count -gt 0) {
+                    $g = $items[$selected]
                     if ($g.MaProfile) {
                         Show-Notice "TDP locked: Motion Assistant has its own profile for this game ($($g.MaProfile).ini)"
                     } else {
@@ -833,8 +986,8 @@ try {
                     }
                 }
             }
-            'Escape'    {   # in a video subfolder: go up a level; otherwise quit
-                if ($tab -eq $VIDEO_TAB -and (Exit-VideoDir)) { break }
+            'Escape'    {   # in a file-tab subfolder: go up a level; otherwise quit
+                if ($cur.Type -eq 'Files' -and (Exit-FileDir $cur)) { break }
                 Clear-Host; exit 0
             }
             'Q'         { Clear-Host; exit 0 }
