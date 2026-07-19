@@ -280,58 +280,40 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr wp, IntPtr lp);
 '@
 } catch {}
 
-function Set-ConsoleFullscreen {
+# Poll for conhost's fullscreen mode to engage - the toggle is not
+# instantaneous, especially via the message path.
+function Wait-FullscreenMode([int]$timeoutMs) {
+    $deadline = [Environment]::TickCount + $timeoutMs
+    do {
+        $m = 0
+        if ([CLI.Native]::GetConsoleDisplayMode([ref]$m) -and $m -ne 0) { return $true }
+        Start-Sleep -Milliseconds 100
+    } while ([Environment]::TickCount -lt $deadline)
+    return $false
+}
+
+# One font size per device, decided once and used in BOTH windowed and
+# fullscreen so the text never changes size between modes. Chosen as the
+# largest Consolas whose measured cells divide the panel closest to
+# exactly (1920x1080 fits 24px cells at 160x45; 1280x720 fits 20px at
+# 128x36) - a perfectly-divided grid also leaves no uncovered strips for
+# the manual fullscreen fallback.
+$script:conFontSize = 0
+function Set-ConsoleFont {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
-
         $font = New-Object CLI.Native+CONSOLE_FONT_INFOEX
         $font.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($font)
-        $font.SizeY = 28; $font.FontFamily = 54; $font.FontWeight = 400
+        $font.FontFamily = 54; $font.FontWeight = 400
         $font.FaceName = 'Consolas'
-        [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
-
-        # First choice: conhost's native fullscreen (what Alt+Enter toggles):
-        # borderless, at the origin, black padding to the screen edges.
-        $coords = 0
-        [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
-        Start-Sleep -Milliseconds 200
-
-        # Some display stacks refuse that legacy mode. Check whether it took;
-        # if not, force it by hand: strip the frame, stretch the window over
-        # the whole screen, and grow the character grid to what fits. The
-        # console paints its own background (black) outside the grid.
-        $mode = 0
-        $native = [CLI.Native]::GetConsoleDisplayMode([ref]$mode) -and $mode -ne 0
-        if (-not $native) {
-            # The direct API call is refused on some devices where conhost's
-            # own Alt+Enter works fine (confirmed on a 720p machine). So do
-            # exactly what the keyboard does: synthesize Alt+Enter - but only
-            # into our own window, and only once it truly holds focus.
-            $hwnd = [CLI.Native]::GetConsoleWindow()
-            [CLI.Native]::SetForegroundWindow($hwnd) | Out-Null
-            Start-Sleep -Milliseconds 150
-            if ([CLI.Native]::GetForegroundWindow() -eq $hwnd) {
-                [CLI.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
-                [CLI.Native]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)   # Enter down
-                [CLI.Native]::keybd_event(0x0D, 0, 2, [UIntPtr]::Zero)   # Enter up
-                [CLI.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
-                Start-Sleep -Milliseconds 350
-                $mode = 0
-                $native = [CLI.Native]::GetConsoleDisplayMode([ref]$mode) -and $mode -ne 0
-            }
-        }
-        if (-not $native) {
+        if (-not $script:conFontSize) {
             $sw = [CLI.Native]::GetSystemMetrics(0)
             $sh = [CLI.Native]::GetSystemMetrics(1)
-            # Conhost snaps its window to whole cells, so a stretched window
-            # springs back to the grid and leaves uncovered strips. Fit the
-            # font to the panel instead: measure real cell sizes back from
-            # conhost and keep the largest font whose cells divide the
-            # screen (at 1280x720, 20px cells fit exactly: 128x36).
-            $bestFs = 28
+            $best = 28
             $bestScore = [int]::MaxValue
             foreach ($fs in 28, 26, 24, 22, 20, 18, 16) {
                 $font.SizeX = 0; $font.SizeY = $fs
@@ -340,13 +322,56 @@ function Set-ConsoleFullscreen {
                 $cur.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($cur)
                 if (-not [CLI.Native]::GetCurrentConsoleFontEx($out, $false, [ref]$cur) -or $cur.SizeX -le 0) { continue }
                 $score = [Math]::Max($sw % $cur.SizeX, $sh % $cur.SizeY)
-                if ($score -lt $bestScore) { $bestScore = $score; $bestFs = $fs }
+                if ($score -lt $bestScore) { $bestScore = $score; $best = $fs }
                 if ($score -le 2) { break }   # candidates run largest-first: first great fit wins
             }
-            $font.SizeX = 0; $font.SizeY = $bestFs
-            [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
+            $script:conFontSize = $best
+        }
+        $font.SizeX = 0; $font.SizeY = $script:conFontSize
+        [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
+    } catch {}
+}
 
-            $hwnd = [CLI.Native]::GetConsoleWindow()
+function Set-ConsoleFullscreen {
+    try {
+        $out = [CLI.Native]::GetStdHandle(-11)
+        Set-ConsoleFont
+
+        # Rung 1: the direct API behind Alt+Enter. Works on some devices
+        # (the 1080p GPD), refused on others (a 720p machine) even though
+        # conhost's own Alt+Enter works fine there.
+        $coords = 0
+        [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
+        $native = Wait-FullscreenMode 600
+        $hwnd = [CLI.Native]::GetConsoleWindow()
+
+        # Rung 2: Alt+Enter as a window message, posted straight to the
+        # console window - the same toggle the physical keys trigger, no
+        # focus required and nothing to leak into other apps.
+        if (-not $native) {
+            [CLI.Native]::PostMessage($hwnd, 0x0104, [IntPtr]0x0D, [IntPtr][int64]0x20000001) | Out-Null   # WM_SYSKEYDOWN Enter, Alt held
+            [CLI.Native]::PostMessage($hwnd, 0x0105, [IntPtr]0x0D, [IntPtr][int64]0xE0000001) | Out-Null   # WM_SYSKEYUP
+            $native = Wait-FullscreenMode 1200
+        }
+
+        # Rung 3: synthesized keystrokes, only into our own focused window.
+        if (-not $native) {
+            [CLI.Native]::SetForegroundWindow($hwnd) | Out-Null
+            Start-Sleep -Milliseconds 150
+            if ([CLI.Native]::GetForegroundWindow() -eq $hwnd) {
+                [CLI.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
+                [CLI.Native]::keybd_event(0x0D, 0, 0, [UIntPtr]::Zero)   # Enter down
+                [CLI.Native]::keybd_event(0x0D, 0, 2, [UIntPtr]::Zero)   # Enter up
+                [CLI.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
+                $native = Wait-FullscreenMode 1200
+            }
+        }
+
+        # Rung 4: force it by hand - strip the frame, grow the grid to what
+        # fits (the panel-fit font means it divides the screen exactly or
+        # nearly so), stretch the window, and pin it back to the origin
+        # after conhost's cell-snap has settled.
+        if (-not $native) {
             $style = [CLI.Native]::GetWindowLong($hwnd, -16)
             $style = $style -band (-bnot 0x00CF0000)   # caption, frame, sysmenu, min/max
             [CLI.Native]::SetWindowLong($hwnd, -16, $style) | Out-Null
@@ -360,12 +385,26 @@ function Set-ConsoleFullscreen {
             $sh = [CLI.Native]::GetSystemMetrics(1)
             # 0x0020 FRAMECHANGED | 0x0040 SHOWWINDOW
             [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, $sw, $sh, 0x0060) | Out-Null
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds 150
+            # conhost may have re-snapped the size; force the position again
+            # (0x0001 SWP_NOSIZE | 0x0010 SWP_NOACTIVATE)
+            [CLI.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, 0x0071) | Out-Null
         }
 
         # buffer == window so there are no scrollbars
         $ws = $Host.UI.RawUI.WindowSize
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
+
+        # Still not covering the screen? Leave a breadcrumb for debugging.
+        if (-not (Test-ConsoleFullscreen)) {
+            try {
+                $r = New-Object CLI.Native+RECT
+                [CLI.Native]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+                $m2 = 0; [CLI.Native]::GetConsoleDisplayMode([ref]$m2) | Out-Null
+                "$(Get-Date -Format s)  fullscreen incomplete: mode=$m2 native=$native font=$($script:conFontSize) rect=$($r.Left),$($r.Top),$($r.Right),$($r.Bottom) screen=$([CLI.Native]::GetSystemMetrics(0))x$([CLI.Native]::GetSystemMetrics(1)) cols=$([Console]::WindowWidth) rows=$([Console]::WindowHeight)" |
+                    Add-Content (Join-Path $PSScriptRoot 'error.log')
+            } catch {}
+        }
     } catch {}
 }
 
@@ -390,6 +429,7 @@ function Set-ConsoleWindowed {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null   # leave native fullscreen
+        Set-ConsoleFont   # same size as fullscreen - the text never changes size
         $hwnd = [CLI.Native]::GetConsoleWindow()
         $style = [CLI.Native]::GetWindowLong($hwnd, -16)
         [CLI.Native]::SetWindowLong($hwnd, -16, ($style -bor 0x00CF0000)) | Out-Null
@@ -1181,14 +1221,15 @@ function Move-Selection([int]$delta) {
 
 try {
     [Console]::CursorVisible = $false
-    if ($script:fsEnabled) { Set-ConsoleFullscreen }
-    # Claim the foreground for real: launched from a hotkey or shortcut
-    # while another app is focused, a new conhost can be denied focus by
-    # Windows - it looks fullscreen but keyboard focus stays behind it.
+    # Claim the foreground FIRST: launched from a hotkey or shortcut while
+    # another app is focused, a new conhost can be denied focus by Windows.
+    # Fullscreen comes after - its Alt+Enter rungs work best on a window
+    # that genuinely holds focus.
     if ($script:conHwnd -ne [IntPtr]::Zero) {
         try { [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null } catch {}
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+    if ($script:fsEnabled) { Set-ConsoleFullscreen }
     Draw-All
     # Drop any keypress still buffered from launching the shortcut (e.g. the
     # Enter that opened it), otherwise it instantly launches the first game.
