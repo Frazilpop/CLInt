@@ -353,6 +353,43 @@ $logoArt = @{
     )
 }
 
+# Extra mascots for additional tabs: the first tab of each type keeps its
+# classic mascot above; every further tab of an already-seen type gets one
+# of these smiley faces instead (assigned in order, cycling if needed).
+$extraArt = @(
+    @(
+    '    \|/'
+    '   .---.'
+    '  / o o \'
+    '  | \_/ |'
+    '   \___/'
+    ),
+    @(
+    '     ___'
+    '   /o o o\'
+    '   \  -  /'
+    '  /=======\'
+    '   ~ ~ ~ ~'
+    ),
+    @(
+    '   /\___/\'
+    '  ( o   o )'
+    '  (  \_/  )'
+    '   -------'
+    ),
+    @(
+    '   .---.'
+    '  / o o \'
+    '  | \_/ |'
+    '  |/\/\/|'
+    )
+)
+
+# Cap on configurable tabs (SETTINGS not counted): the tab bar starts at
+# column 15 and each named tab takes roughly 15-16 columns, so ~8 content
+# tabs plus SETTINGS is what a fullscreen console row actually fits.
+$MAX_TABS = 8
+
 $vlcExe     = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
 $videoExtRe = '^\.(mp4|mkv|avi|webm|mov|m4v|wmv|mpg|mpeg|ts|flv)$'
 
@@ -406,8 +443,22 @@ function New-TabState($cfg) {
 
 function Build-Tabs {
     $script:tabs = @()
-    foreach ($cfg in $settings['Tabs']) { $script:tabs += New-TabState $cfg }
-    $script:tabs += New-TabState @{ Type = 'Settings' }
+    $seenType = @{}
+    $extraIdx = 0
+    foreach ($cfg in $settings['Tabs']) {
+        $t = New-TabState $cfg
+        if ($seenType[$t.Type]) {
+            $t.Logo = $extraArt[$extraIdx % $extraArt.Count]
+            $extraIdx++
+        } else {
+            $t.Logo = $logoArt[$t.Type]
+            $seenType[$t.Type] = $true
+        }
+        $script:tabs += $t
+    }
+    $st = New-TabState @{ Type = 'Settings' }
+    $st.Logo = $logoArt['Settings']
+    $script:tabs += $st
 }
 Build-Tabs
 
@@ -530,6 +581,7 @@ function Draw-GameLine([int]$i) {
 }
 
 $noticeShown = $false
+$pendingNotice = $null   # set by modals; shown after the next full redraw
 function Show-Notice([string]$text) {
     Write-At 15 4 (Pad $text ($W - 16)) 'Yellow'
     $script:noticeShown = $true
@@ -546,7 +598,7 @@ function Draw-All {
     Get-Layout
     $script:noticeShown = $false
     $cur = $tabs[$tab]
-    $logo = $logoArt[$cur.Type]
+    $logo = if ($cur.Logo) { $cur.Logo } else { $logoArt[$cur.Type] }
     for ($i = 0; $i -lt $logo.Count; $i++) {
         Write-At 2 $i $logo[$i] 'Magenta'
     }
@@ -861,6 +913,10 @@ function Edit-TabConfig([int]$i) {
 }
 
 function Add-TabConfig {
+    if ($settings['Tabs'].Count -ge $MAX_TABS) {
+        $script:pendingNotice = "Tab limit reached ($MAX_TABS) - remove a tab first"
+        return
+    }
     $choice = Pick-Option 'ADD A TAB' @(
         'Steam games      - your Steam library, incl. non-Steam shortcuts',
         'Shortcuts folder - .lnk shortcuts launched as games/apps',
@@ -992,6 +1048,10 @@ try {
                     $script:items    = @(Get-TabItems $tab)
                     $script:selected = [Math]::Min($selected, [Math]::Max(0, $items.Count - 1))
                     Draw-All
+                    if ($script:pendingNotice) {
+                        Show-Notice $script:pendingNotice
+                        $script:pendingNotice = $null
+                    }
                     break
                 }
                 if ($cur.Type -eq 'Files') {
