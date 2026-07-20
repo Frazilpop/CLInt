@@ -1,9 +1,11 @@
-# CLInt    
+# CLInt
 
-  .---.    
- / o o \  
- | \_/ |  
- |/\/\/|  
+```
+   .---.
+  / o o \
+  | \_/ |
+  |/\/\/|
+```
 
 Meet your new friend CLInt. He's a full-screen launcher for games and videos on
 Windows. Designed for speed and simplicity, he's here to help.
