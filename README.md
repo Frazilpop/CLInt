@@ -1,36 +1,40 @@
-# CLInt
+# CLInt    
 
-```text
-   /\      .---------.
-  /##\     | .-----. |  .----------.    \|/       ___                            ____                      ___
- / o o \   |+| o o |b|  | (o)  (o) |   .---.    /o o o\    /\___/\    .---.    /      \        ___       .[___].
- | \_/ |   | | \_/ |a|  |   \__/   |  / o o \   \  -  /   ( o   o )  / o o \  |  o  o  |     / o o \     | o o |
-/|#####|\  | '-----' |  | [======] |  | \_/ |  /=======\  (  \_/  )  | \_/ |  |  \__/  |  --(  \_/  )--  | \_/ |
-  ^^ ^^    '---------'  '----------'   \___/    ~ ~ ~ ~    -------   |/\/\/|   \______/       \___/      '-----'
-```
+ .---.    
+/ o o \  
+| \_/ |  
+|/\/\/|  
 
-A full-screen launcher for games and videos on
-Windows. Designed for speed and simplicity.
+Meet your new friend CLInt. He's a full-screen launcher for games and videos on
+Windows. Designed for speed and simplicity, he's here to help.
 
-## Load the following
+## A content loader that won't make you sick and kill you
 
-- **STEAM GAMES** — scans Steam's appmanifest files (no network) and
+Configurable tabs to load the following:
+
+- **STEAM GAMES** — scans Steam's appmanifest and
   launches via `steam://`. Non-Steam shortcuts from `shortcuts.vdf` work
   too.
 - **LOCAL GAMES** — launches `.lnk` shortcuts from a configurable folder,
   tracking the game by its target exe.
-- **VIDEOS** — a folder browser that plays files via VLC fullscreen.
-- **SETTINGS** — video and game-shortcut folders, picked with the gamepad,
+- **VIDEOS** — a folder browser that plays video files. VLC reccomended for play count tracking and auto resume. Other players supported too.
+- **SETTINGS** — deep app customisation,
   persisted to `settings.json`.
+  
+## How to Install
 
-## TDP – Motion Assistant
+Download this folder as a ZIP. Extract anywhere and run
+`Install.bat`. The installer copies the icon to `%LOCALAPPDATA%\CLInt`
+
+## TDP – Motion Assistant support (for WIN GPD Devices)
 
   Built-in support for machines with GDP Motion Assistant. RB
   cycles between default and per-game wattage profile, applied at launch with
   Motion Assistant's bundled `ryzenadj` (works unelevated because its
   driver is already loaded) and restored when the game exits. Stored in
-  `tdp-settings.json`. Auto-detected: without Motion Assistant the
-  feature is hidden and CLInt is a plain launcher.
+  `tdp-settings.json`. 
+  
+  This feature is auto-detected and hidden if Motion Assistant is not installed.
 
 ## Controls
 
@@ -39,19 +43,13 @@ launch, B to go back/quit, RB to cycle TDP for the highlighted game.
 
 The controller is read natively via XInput. Keyboard works too.
 
-## Install
-
-Put this folder anywhere and run
-`Install.bat`. The installer copies the icon to `%LOCALAPPDATA%\CLInt`
-
 ## HotKey
 
-On launch there is the option to bind a global hardware key
+During installation there is the option to bind a global hardware key
 that opens/hides the CLInt menu from anywhere: this requires AutoHotkey v2, which is installed if
-you agree, asks you to **press the shortkut key you want**, and wires it up. This can be skipped
-and the desktop shortcut alone is a complete install.
+you agree. This can be skipped if you're prefer, and CLInt can still be loaded from the desktop shortcut.
 
 ## Updating
 
 **SETTINGS → Check for updates**, then press A. Git installs update via
-git pull.
+git pull. Optionally check for new updates on launch.
