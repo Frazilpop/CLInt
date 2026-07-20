@@ -12,7 +12,7 @@ Windows. Designed for speed and simplicity, he's here to help.
 
 ## A content loader that won't make you sick and kill you
 
-Configurable tabs to load the following:
+A minimalist interface with configurable tabs to load the following:
 
 - **STEAM GAMES** — scans Steam's appmanifest and
   launches via `steam://`. Non-Steam shortcuts from `shortcuts.vdf` work
