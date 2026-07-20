@@ -2,7 +2,7 @@
 
 ```
    .---.
-  / o o \
+  / o o \    Hello, I'm your new friend, CLInt.
   | \_/ |
   |/\/\/|
 ```
