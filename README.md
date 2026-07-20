@@ -3,7 +3,7 @@
 ```
    .---.
   / o o \    
-  | \_/ |      "Hello, I'm your new friend CLInt."
+  | \_/ |      "Hello. I'm your new friend, CLInt."
   |/\/\/|
 ```
 
