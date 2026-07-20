@@ -6,3 +6,7 @@ recent.json
 watch-history.json
 update-available.txt
 error.log
+
+# Claude Code dev-machine files (contain personal paths)
+CLAUDE.md
+.claude/
