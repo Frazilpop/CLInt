@@ -57,8 +57,14 @@ if (-not (Test-Path $settingsPath)) {
         $tabs += @{ Type = 'Files'; Path = $(if ($vidAns) { $vidAns } else { $vidDef }) }
     }
 
-    @{ Tabs = $tabs } | ConvertTo-Json -Depth 5 | Set-Content $settingsPath -Encoding utf8
+    # Launch-time update check: opt-in, matching the SETTINGS default.
+    Write-Host ""
+    $updAns = Read-Host "  Check for updates when CLInt starts? [y/N]"
+    $autoUpd = $updAns -match '^[yY]'
+
+    @{ Tabs = $tabs; AutoUpdateCheck = $autoUpd } | ConvertTo-Json -Depth 5 | Set-Content $settingsPath -Encoding utf8
     Write-Host "  Tabs saved: $($tabs.Count) configured." -ForegroundColor Green
+    Write-Host "  Update check at launch: $(if ($autoUpd) { 'on' } else { 'off' })" -ForegroundColor Green
 } else {
     Write-Host "  Existing settings.json found - keeping your current tabs." -ForegroundColor Green
 }
@@ -169,5 +175,12 @@ if ($wantKey -notmatch '^[nN]') {
 
 Write-Host ""
 Write-Host "  Done." -ForegroundColor Magenta
+Write-Host ""
+Write-Host "     .---."   -ForegroundColor Cyan
+Write-Host "    / o o \"  -ForegroundColor Cyan
+Write-Host "    | \_/ |"  -ForegroundColor Cyan
+Write-Host "    |/\/\/|"  -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Your new friend CLInt says hello" -ForegroundColor Magenta
 Write-Host ""
 Read-Host "  Press Enter to close"
