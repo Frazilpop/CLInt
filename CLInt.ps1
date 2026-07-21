@@ -323,14 +323,13 @@ public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int
 # Conhost adds scrollbars during transient buffer/window mismatches (e.g.
 # the default 120-wide buffer meeting a narrower fullscreen window at
 # startup) and does NOT reliably remove them once the sizes agree again -
-# the bar just lingers, dead. Hide it explicitly whenever it's present.
+# the bar just lingers, dead, sometimes with the window style bits already
+# cleared (so gating on GetWindowLong misses it). Hide unconditionally:
+# ShowScrollBar(off) is cheap and a no-op when no bar exists.
 function Hide-Scrollbars {
     try {
         $h = [CLI.Native]::GetConsoleWindow()
-        $style = [CLI.Native]::GetWindowLong($h, -16)
-        if ($style -band 0x00300000) {   # WS_HSCROLL | WS_VSCROLL
-            [CLI.Native]::ShowScrollBar($h, 3, $false) | Out-Null   # SB_BOTH
-        }
+        [CLI.Native]::ShowScrollBar($h, 3, $false) | Out-Null   # SB_BOTH
     } catch {}
 }
 
@@ -1050,6 +1049,7 @@ function Draw-All {
         Write-At 6 $listTop (Pad $msg ($W - 8)) $theme.Hint
     }
     Draw-List
+    Hide-Scrollbars   # full redraws follow the moments bars sneak in (launch, game return, tab config)
     if ($script:autoCheck -and -not $script:updateNoticeShown -and
         (Test-Path (Join-Path $PSScriptRoot 'update-available.txt'))) {
         $script:updateNoticeShown = $true
@@ -1068,9 +1068,17 @@ function Draw-List {
     for ($y = $listTop + [Math]::Max(0, $items.Count - $offset); $y -lt $listTop + $visible; $y++) {
         Write-At 1 $y (' ' * ($W - 3)) $theme.Text
     }
+    Draw-ScrollHints
+}
+
+# The viewport's edge rows double as the '/\ more' / '\/ more' indicator
+# rows, and a game line paints right up to the indicator's second-last
+# column - so ANY repaint of an edge row (the selection bar landing there,
+# a TDP tag update) must re-stamp the indicators afterwards, or all that
+# survives of 'more' is its final 'e'.
+function Draw-ScrollHints {
     Write-At ($W - 2) $listTop ' ' $theme.Text
     Write-At ($W - 2) ($listTop + $visible - 1) ' ' $theme.Text
-    # scroll indicators
     if ($offset -gt 0)                       { Write-At ($W - 8) $listTop '/\ more' $theme.Scroll }
     if ($offset + $visible -lt $items.Count) { Write-At ($W - 8) ($listTop + $visible - 1) '\/ more' $theme.Scroll }
 }
@@ -1534,6 +1542,7 @@ function Move-Selection([int]$delta) {
     } else {
         Draw-GameLine $old        # repaint only the two lines that changed
         Draw-GameLine $script:selected
+        Draw-ScrollHints          # in case either line was an indicator row
     }
 }
 
@@ -1855,6 +1864,7 @@ try {
                         else             { $tdpMap[[string]$g.AppId] = $next }
                         Save-TdpMap
                         Draw-GameLine $selected
+                        Draw-ScrollHints   # in case the selected line is an indicator row
                     }
                 }
             }
