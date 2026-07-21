@@ -598,18 +598,29 @@ function Get-VlcResumeSeconds {
     return $map
 }
 
-# Recently played games first (most recent at the top); everything else
-# keeps its alphabetical order. No-op while the feature is off.
+# Recently played games sit in their own titled section at the top (most
+# recent first), with a gap before the A-Z list so the split is obvious.
+# The title/spacer rows carry Unselectable = $true: the cursor slides past
+# them and they can't be launched. No-op while the feature is off.
 function Sort-Games($list) {
+    $list = @($list | Where-Object { -not $_.Unselectable })   # strip old section rows before re-sorting
     if (-not $script:recentEnabled -or $script:recentMap.Count -eq 0) { return @($list) }
     $recent = @(); $rest = @()
     foreach ($g in $list) {
         if ($script:recentMap[[string]$g.AppId]) { $recent += $g } else { $rest += $g }
     }
+    if ($recent.Count -eq 0) { return @($rest) }
     $recent = @($recent | Sort-Object {
         try { [DateTime]$script:recentMap[[string]$_.AppId].Last } catch { [DateTime]::MinValue }
     } -Descending)
-    return @($recent + $rest)
+    $out = @([pscustomobject]@{ Name = 'RECENTLY PLAYED'; Unselectable = $true })
+    $out += $recent
+    if ($rest.Count -gt 0) {
+        $out += [pscustomobject]@{ Name = '';    Unselectable = $true }   # blank spacer row
+        $out += [pscustomobject]@{ Name = 'A-Z'; Unselectable = $true }
+        $out += $rest
+    }
+    return @($out)
 }
 
 $isFullscreen = $false   # what the window IS right now (owned by the Set-Console* functions)
@@ -811,6 +822,7 @@ function Switch-Tab([int]$delta) {
     $script:tab = ($script:tab + $delta + $tabs.Count) % $tabs.Count
     $script:items    = @(Get-TabItems $script:tab)
     $script:selected = [Math]::Min($tabs[$script:tab].Sel, [Math]::Max(0, $script:items.Count - 1))
+    Snap-Selection
     $script:offset   = $tabs[$script:tab].Off
     Draw-All
 }
@@ -853,7 +865,26 @@ function Exit-FileDir($t) {
     return $true
 }
 
+# Section rows (the RECENTLY PLAYED / A-Z titles and their spacer) are
+# drawn in the list but can never hold the cursor.
+function Get-FirstSelectable {
+    for ($i = 0; $i -lt $script:items.Count; $i++) {
+        if (-not $script:items[$i].Unselectable) { return $i }
+    }
+    return 0
+}
+# After a list rebuild a restored cursor position can land on a section
+# row - nudge it down to the nearest real item (up from the very end).
+function Snap-Selection {
+    if ($script:items.Count -eq 0) { return }
+    $i = [Math]::Min([Math]::Max(0, $script:selected), $script:items.Count - 1)
+    while ($i -lt $script:items.Count - 1 -and $script:items[$i].Unselectable) { $i++ }
+    while ($i -gt 0 -and $script:items[$i].Unselectable) { $i-- }
+    $script:selected = $i
+}
+
 $items = @(Get-TabItems 0)
+Snap-Selection
 
 function Write-At([int]$x, [int]$y, [string]$text, $fg, $bg) {
     [Console]::SetCursorPosition($x, $y)
@@ -889,6 +920,11 @@ function Draw-GameLine([int]$i) {
     $y = $listTop + ($i - $offset)
     if ($i -lt $offset -or $i -ge $offset + $visible) { return }
     $lineW = $W - 3   # not $w: case-insensitively shadows $W (see Pick-Folder)
+    if ($items[$i].Unselectable) {
+        # section title (or blank spacer) - muted, slightly outdented
+        Write-At 1 $y (Pad ("   " + $items[$i].Name) $lineW) $theme.Hint
+        return
+    }
     $label = $items[$i].Name
     $type = $tabs[$tab].Type
     if ($type -in 'Steam', 'Shortcuts') {
@@ -995,9 +1031,10 @@ function Draw-All {
         else             { Write-At $x 0 $txt $theme.Hint }
         $x += $txt.Length + $gap
     }
+    $nReal = @($items | Where-Object { -not $_.Unselectable }).Count   # section rows aren't games
     $count = switch ($cur.Type) {
-        'Steam'     { "$($items.Count) Steam games installed" }
-        'Shortcuts' { "$($items.Count) shortcuts" }
+        'Steam'     { "$nReal Steam games installed" }
+        'Shortcuts' { "$nReal shortcuts" }
         'Files'     { Pad "$($cur.Dir)  ($($items.Count) items)" ($W - 16) }
         'Settings'  { 'settings are saved automatically' }
     }
@@ -1479,7 +1516,15 @@ function Move-Selection([int]$delta) {
     if ($items.Count -eq 0) { return }
     Clear-Notice
     $old = $script:selected
-    $script:selected = ($script:selected + $delta + $items.Count) % $items.Count
+    $new = ($script:selected + $delta + $items.Count) % $items.Count
+    # Section rows can't hold the cursor: keep sliding the way we were
+    # going (wrapping, just like the move itself) until a real item.
+    $step = if ($delta -lt 0) { -1 } else { 1 }
+    $guard = $items.Count
+    while ($items[$new].Unselectable -and $guard-- -gt 0) {
+        $new = ($new + $step + $items.Count) % $items.Count
+    }
+    $script:selected = $new
     if ($script:selected -lt $script:offset) {
         $script:offset = $script:selected
         Draw-List
@@ -1530,17 +1575,18 @@ try {
                             # free-running modulo math on a list barely
                             # longer than a page LOOKS like reverse cycling
                 if ($items.Count -gt 0) {
-                    if ($selected -ge $items.Count - 1) { Move-Selection (-($items.Count - 1)) }   # at the end: wrap to top
+                    if ($selected -ge $items.Count - 1) { Move-Selection ((Get-FirstSelectable) - $selected) }   # at the end: wrap to top
                     else { Move-Selection ([Math]::Min($visible, $items.Count - 1 - $selected)) }
                 }
             }
             'PageUp'    {
                 if ($items.Count -gt 0) {
-                    if ($selected -le 0) { Move-Selection ($items.Count - 1) }   # at the top: wrap to end
-                    else { Move-Selection (-([Math]::Min($visible, $selected))) }
+                    $first = Get-FirstSelectable
+                    if ($selected -le $first) { Move-Selection ($items.Count - 1 - $selected) }   # at the top: wrap to end
+                    else { Move-Selection (-([Math]::Min($visible, $selected - $first))) }
                 }
             }
-            'Home'      { Move-Selection (-$selected) }
+            'Home'      { Move-Selection ((Get-FirstSelectable) - $selected) }
             'End'       { Move-Selection ($items.Count - 1 - $selected) }
             'LeftArrow'  { Switch-Tab -1 }
             'RightArrow' { Switch-Tab 1 }
@@ -1560,6 +1606,7 @@ try {
                                     Save-Settings; Build-Tabs
                                     $script:items = @(Get-TabItems $tab)
                                     $script:selected = 0; $script:offset = 0
+                                    Snap-Selection
                                 }
                             }
                             1 {
@@ -1568,6 +1615,7 @@ try {
                                 $script:tab = [Math]::Min($tab, $tabs.Count - 1)
                                 $script:items = @(Get-TabItems $tab)
                                 $script:selected = 0; $script:offset = 0
+                                Snap-Selection
                             }
                         }
                         Draw-All
@@ -1747,6 +1795,7 @@ try {
                     break
                 }
                 $g = $items[$selected]
+                if ($g.Unselectable) { break }   # section row: nothing to launch
                 Clear-Host
                 Write-Host ""
                 Write-Host "      _" -ForegroundColor $theme.Accent
@@ -1783,6 +1832,7 @@ try {
                     }
                     $script:items    = $cur.Items
                     $script:selected = [Math]::Max(0, [array]::IndexOf($cur.Items, $g))
+                    Snap-Selection
                     $script:offset   = 0
                 }
                 # bring the menu window back to the front, drop any keys
@@ -1795,6 +1845,7 @@ try {
             'F5'        {   # RB on the gamepad (read natively via XInput)
                 if ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts' -and $items.Count -gt 0) {
                     $g = $items[$selected]
+                    if ($g.Unselectable) { break }   # section row: no TDP to cycle
                     if ($g.MaProfile) {
                         Show-Notice "TDP locked: Motion Assistant has its own profile for this game ($($g.MaProfile).ini)"
                     } else {
