@@ -2426,10 +2426,16 @@ try {
                     Write-Host "    | |>  |    NOW PLAYING" -ForegroundColor $theme.Accent
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
-                    if ($script:videoHistEnabled -and $isVideo) { Record-VideoPlay $v.Path }
                     $landedAt = $null
                     if ($isVideo -and $vlcExe) {
-                        Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
+                        # Resume explicitly: VLC's own continue-playback prompt
+                        # is a mouse-only toast that vanishes after ~10s, so a
+                        # gamepad user misses it and starts over. The [>>] tag
+                        # already knows the position - hand it to VLC directly.
+                        $vlcArgs = @('--fullscreen', '--play-and-exit')
+                        if ($script:videoHistEnabled -and $v.Resume) { $vlcArgs += "--start-time=$([int]$v.Resume)" }
+                        $vlcArgs += "`"$($v.Path)`""
+                        Start-Process $vlcExe -ArgumentList $vlcArgs
                         $script:landingPainted = $false
                         $wrapSb = { Draw-WrapScreen $v.Name }.GetNewClosure()
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' }) 0 90 $wrapSb
@@ -2439,7 +2445,17 @@ try {
                         # pre-painted behind VLC while it played, same as games
                         if (-not $script:landingPainted) { Draw-WrapScreen $v.Name }
                         $landedAt = [DateTime]::Now
+                        # A launch is not a watch: only count a play once the
+                        # video reaches the end. VLC clears its saved position
+                        # on completion, so a leftover position means the user
+                        # bailed partway - resuming later isn't another play.
+                        if ($script:videoHistEnabled -and -not (Get-VlcResumeSeconds)[$v.Path.ToLower()]) {
+                            Record-VideoPlay $v.Path
+                        }
                     } else {
+                        # No VLC = no exit signal and no resume state: the old
+                        # count-on-launch is the best available.
+                        if ($script:videoHistEnabled -and $isVideo) { Record-VideoPlay $v.Path }
                         Start-Process $v.Path   # default app for this file type
                         Start-Sleep -Seconds 5
                         Show-MenuWindow
