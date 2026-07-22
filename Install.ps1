@@ -34,6 +34,31 @@ Write-Host "  Desktop shortcut created: CLInt" -ForegroundColor Green
 # --- 3. First-run tab setup -------------------------------------------
 # Only on a fresh install: an existing settings.json is left untouched.
 # Everything chosen here can be changed later in the SETTINGS tab.
+
+# Enter = default, B = Windows folder-browse dialog, '-' = skip (returns $null).
+# Typing a path still works, but nobody should have to.
+function Select-Folder([string]$Prompt, [string]$Default) {
+    while ($true) {
+        $ans = Read-Host "  $Prompt [Enter = $Default, B = browse, '-' = skip]"
+        if ($ans -eq '-') { return $null }
+        if (-not $ans) { return $Default }
+        if ($ans -match '^[bB]$') {
+            Add-Type -AssemblyName System.Windows.Forms
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dlg.Description = $Prompt
+            $dlg.ShowNewFolderButton = $true
+            if (Test-Path $Default) { $dlg.SelectedPath = $Default }
+            # TopMost owner keeps the dialog from opening behind the console.
+            $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+            $result = $dlg.ShowDialog($owner)
+            $owner.Dispose()
+            if ($result -eq 'OK') { return $dlg.SelectedPath }
+            continue   # cancelled the dialog - ask again
+        }
+        return $ans
+    }
+}
+
 $settingsPath = Join-Path $here 'settings.json'
 if (-not (Test-Path $settingsPath)) {
     Write-Host ""
@@ -44,17 +69,18 @@ if (-not (Test-Path $settingsPath)) {
     if ($steamAns -notmatch '^[nN]') { $tabs += @{ Type = 'Steam' } }
 
     $shortDef = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts'
-    $shortAns = Read-Host "  Folder for a game/app shortcuts tab [Enter = $shortDef, '-' = skip]"
-    if ($shortAns -ne '-') {
-        $p = if ($shortAns) { $shortAns } else { $shortDef }
+    $p = Select-Folder 'Folder for a game/app shortcuts tab' $shortDef
+    if ($null -ne $p) {
         if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force $p | Out-Null }
         $tabs += @{ Type = 'Shortcuts'; Path = $p }
+        Write-Host "  Shortcuts tab: $p" -ForegroundColor Green
     }
 
     $vidDef = [Environment]::GetFolderPath('MyVideos')
-    $vidAns = Read-Host "  Folder for a videos/files tab [Enter = $vidDef, '-' = skip]"
-    if ($vidAns -ne '-') {
-        $tabs += @{ Type = 'Files'; Path = $(if ($vidAns) { $vidAns } else { $vidDef }) }
+    $p = Select-Folder 'Folder for a videos/files tab' $vidDef
+    if ($null -ne $p) {
+        $tabs += @{ Type = 'Files'; Path = $p }
+        Write-Host "  Videos/files tab: $p" -ForegroundColor Green
     }
 
     # Launch-time update check: opt-in, matching the SETTINGS default.
