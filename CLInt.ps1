@@ -2006,7 +2006,7 @@ try {
                              -not (Get-Process steam -ErrorAction SilentlyContinue)
                 if ($steamCold) {
                     Write-Host ""
-                    Write-Host "   Steam is starting in the background - this launch takes a little longer" -ForegroundColor $theme.Notice
+                    Write-Host "   Steam is starting in the background. Hang on a second..." -ForegroundColor $theme.Notice
                 }
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
