@@ -116,17 +116,39 @@ if ($vlcFound) {
 # own. The binding needs AutoHotkey v2 (tiny, free), because a global
 # hotkey has to live in something that's always running.
 function Find-Ahk {
-    $candidates = @(
-        "$env:LOCALAPPDATA\Programs\AutoHotkey\v2\AutoHotkey64.exe",
-        "$env:ProgramFiles\AutoHotkey\v2\AutoHotkey64.exe",
-        "${env:ProgramFiles(x86)}\AutoHotkey\v2\AutoHotkey64.exe"
-    )
-    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+    # _UIA first. That build runs with UI Access, and without it a global
+    # hotkey silently stops working whenever anything elevated is in front
+    # (a game with anti-cheat, an admin console): Windows won't deliver the
+    # key to a lower-privilege process, and won't let it pull a window to
+    # the foreground either. It only exists in an admin-installed
+    # AutoHotkey, hence the plain build right behind it.
+    $roots = @("$env:ProgramFiles\AutoHotkey\v2", "${env:ProgramFiles(x86)}\AutoHotkey\v2",
+               "$env:LOCALAPPDATA\Programs\AutoHotkey\v2")
+    foreach ($exe in @('AutoHotkey64_UIA.exe', 'AutoHotkey64.exe', 'AutoHotkey32.exe', 'AutoHotkey.exe')) {
+        foreach ($r in $roots) { if (Test-Path (Join-Path $r $exe)) { return (Join-Path $r $exe) } }
+    }
     return $null
 }
 
+# Is the hotkey script actually running? The only answer that matters -
+# every earlier failure here was silent.
+function Test-HotkeyLive {
+    return [bool]@(Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })
+}
+
 Write-Host ""
+# Nothing in this section may take the installer down with it: a hotkey is
+# the optional extra, and the install that came before it is what actually
+# matters. (It used to abort the whole script - see the Run key below.)
+try {
 if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
+
+    # A shortcut from a pre-v0.2.18 install would start a second copy of
+    # the hotkey at logon, racing this one for the same key.
+    $startupDir = [Environment]::GetFolderPath('Startup')
+    if (-not $startupDir) { $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup' }
+    Remove-Item (Join-Path $startupDir 'CLIntKey.lnk') -Force -ErrorAction SilentlyContinue
 
     $ahk = Find-Ahk
     if (-not $ahk) {
@@ -173,18 +195,50 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
         }
         Set-Content -Path (Join-Path $dataDir 'menu-key.txt') -Value $keyName -Encoding Ascii
 
-        $startupLnk = $wsh.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'CLIntKey.lnk'))
-        $startupLnk.TargetPath = $ahk
-        $startupLnk.Arguments  = "`"$(Join-Path $here 'CLIntKey.ahk')`""
-        $startupLnk.Save()
+        # Load at logon from HKCU ...\Run, not a shortcut in the Startup
+        # folder. GetFolderPath('Startup') returns an EMPTY string whenever
+        # that shell folder points somewhere that no longer exists - and the
+        # Join-Path failure that followed killed this installer outright,
+        # right here, leaving no startup entry, no running hotkey and no
+        # error anyone would see. A registry value has nothing to resolve.
+        $ahkArgs = "`"$(Join-Path $here 'CLIntKey.ahk')`""
+        $runKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if (-not (Test-Path $runKey)) { New-Item $runKey -Force | Out-Null }
+        Set-ItemProperty $runKey -Name 'CLIntKey' -Value "`"$ahk`" $ahkArgs"
         Write-Host "  Startup entry created (hotkey loads on every boot)" -ForegroundColor Green
 
-        Start-Process $ahk -ArgumentList "`"$(Join-Path $here 'CLIntKey.ahk')`""
-        Write-Host "  Hotkey is active NOW - press it to test." -ForegroundColor Cyan
+        # Replace any copy already running, then confirm ours stayed up -
+        # the _UIA build refuses to start on some systems, and a hotkey that
+        # died on launch is indistinguishable from one that was never set up.
+        foreach ($p in @(Get-CimInstance Win32_Process |
+                Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })) {
+            try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
+        }
+        Start-Process $ahk -ArgumentList $ahkArgs
+        Start-Sleep -Milliseconds 900
+        if (-not (Test-HotkeyLive) -and $ahk -match '_UIA' -and (Test-Path ($ahk -replace '_UIA', ''))) {
+            $ahk = $ahk -replace '_UIA', ''
+            Write-Host "  UI Access build wouldn't start - using $(Split-Path $ahk -Leaf)." -ForegroundColor Yellow
+            Set-ItemProperty $runKey -Name 'CLIntKey' -Value "`"$ahk`" $ahkArgs"
+            Start-Process $ahk -ArgumentList $ahkArgs
+            Start-Sleep -Milliseconds 900
+        }
+        if (Test-HotkeyLive) {
+            Write-Host "  Hotkey is active NOW - press $keyName to test." -ForegroundColor Cyan
+        } else {
+            Write-Host "  The hotkey script did not stay running. Start it by hand to" -ForegroundColor Yellow
+            Write-Host "  see the error: `"$ahk`" $ahkArgs" -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host "  Skipped. The desktop shortcut does everything; re-run Install.bat" -ForegroundColor DarkGray
     Write-Host "  if you want the hotkey later." -ForegroundColor DarkGray
+}
+} catch {
+    Write-Host ""
+    Write-Host "  Hotkey setup didn't complete: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  Everything else is installed and working - re-run Install.bat" -ForegroundColor Yellow
+    Write-Host "  to try the hotkey again." -ForegroundColor Yellow
 }
 
 Write-Host ""

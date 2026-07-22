@@ -10,14 +10,29 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder buf, int n);
 '@
 
-# Find the menu by OWNER, not by window title: any other console sitting in
-# a folder named CLInt (a dev shell, Claude Code's own conhost) carries the
-# identical title, and title-matching used to grab whichever was higher in
-# z-order. Console windows report the attached shell's PID, so the real
-# menu is the powershell whose command line is running CLInt.ps1.
 function Find-CLIntWindow {
+    # CLInt.ps1 records its own console window handle at startup, so the
+    # usual case is one existence check. Handle AND title have to match: a
+    # stale file left behind by a crash must resolve to nothing rather than
+    # to an unrelated window Windows has recycled the handle for.
+    try {
+        $h = [IntPtr][int64](Get-Content (Join-Path $PSScriptRoot 'data\clint.hwnd') -TotalCount 1).Trim()
+        if ([Win32.Native]::IsWindow($h)) {
+            $sb = New-Object System.Text.StringBuilder 32
+            [void][Win32.Native]::GetWindowText($h, $sb, $sb.Capacity)
+            if ($sb.ToString() -eq 'CLInt') { return $h }
+        }
+    } catch {}
+    # Fallback for an instance that started before this version: find it by
+    # OWNER, not by window title, because any other console sitting in a
+    # folder named CLInt (a dev shell, Claude Code's own conhost) carries
+    # the identical title, and title-matching used to grab whichever was
+    # higher in z-order. Console windows report the attached shell's PID,
+    # so the real menu is the powershell running CLInt.ps1.
     foreach ($p in Get-CimInstance Win32_Process -Filter "Name='powershell.exe'") {
         if ($p.ProcessId -ne $PID -and $p.CommandLine -like '*CLInt.ps1*') {
             $wnd = (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle

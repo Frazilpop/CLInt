@@ -49,7 +49,7 @@ if (-not $List) {
     }
 }
 
-$Host.UI.RawUI.WindowTitle = 'CLInt'   # first-pass filter for CLIntKey.ahk's finder (which verifies the owner process) and matched by claude-gamepad.ahk
+$Host.UI.RawUI.WindowTitle = 'CLInt'   # matched by claude-gamepad.ahk, and the second half of the hotkey's window check (see clint.hwnd below)
 
 # ------------------------------------------------------ Folder layout ---
 # The app's code lives in app\, per-machine data in data\, and the root
@@ -60,12 +60,22 @@ $script:rootDir = if ((Split-Path $PSScriptRoot -Leaf) -eq 'app') { Split-Path $
 $script:dataDir = Join-Path $script:rootDir 'data'
 if (-not (Test-Path $script:dataDir)) { New-Item -ItemType Directory -Force $script:dataDir | Out-Null }
 
-# One-time migration from the pre-v0.2.10 flat layout, where the data
-# files and every script sat at the root. Only acts when leftovers exist:
-# moves data files into data\, sweeps stale root script copies (a ZIP
-# overlay only adds files; git pull removes its own), and repoints the
-# Startup hotkey shortcut at app\CLIntKey.ahk, swapping any running
-# old-path hotkey instance so two handlers never race.
+# Announce our own console window, so the hotkey (CLIntKey.ahk) and the
+# desktop shortcut (Launch.ps1) can find the menu with one existence check
+# instead of scanning every process's command line. Both verify the title
+# as well as the handle, so a stale file left by a crash resolves to
+# nothing rather than to some unrelated window Windows has since recycled
+# the handle for.
+try {
+    Set-Content (Join-Path $script:dataDir 'clint.hwnd') `
+        ([int64](Get-Process -Id $PID).MainWindowHandle) -Encoding Ascii
+} catch {}   # read-only data folder must never stop the menu from starting
+
+# One-time migration from older layouts. Only acts when leftovers exist:
+# moves pre-v0.2.10 root data files into data\, sweeps stale root script
+# copies (a ZIP overlay only adds files; git pull removes its own), and
+# carries a pre-v0.2.18 Startup shortcut for the hotkey over to the
+# registry Run entry that replaced it.
 try {
     $legacyData = @(@('settings.json', 'tdp-settings.json', 'menu-key.txt', 'recent.json',
                       'watch-history.json', 'update-available.txt', 'error.log') |
@@ -76,21 +86,30 @@ try {
         else { Move-Item $old $script:dataDir -Force }
     }
     if ((Split-Path $PSScriptRoot -Leaf) -eq 'app') {
-        $lnkPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'CLIntKey.lnk'
+        # Resolve Startup the long way round: GetFolderPath returns an EMPTY
+        # string whenever that shell folder points somewhere that no longer
+        # exists, and the resulting Join-Path failure is what used to break
+        # both this migration and the installer's hotkey setup.
+        $startup = [Environment]::GetFolderPath('Startup')
+        if (-not $startup) { $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup' }
+        $lnkPath = Join-Path $startup 'CLIntKey.lnk'
         if (Test-Path $lnkPath) {
-            $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
-            $oldAhkRx = [regex]::Escape((Join-Path $script:rootDir 'CLIntKey.ahk'))
-            if ($lnk.Arguments -match $oldAhkRx) {
-                $lnk.Arguments = "`"$(Join-Path $PSScriptRoot 'CLIntKey.ahk')`""
-                $lnk.Save()
-                foreach ($p in @(Get-CimInstance Win32_Process |
-                        Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match $oldAhkRx })) {
-                    try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
-                }
-                if (Test-Path $lnk.TargetPath) {
-                    Start-Process $lnk.TargetPath -ArgumentList "`"$(Join-Path $PSScriptRoot 'CLIntKey.ahk')`""
-                }
+            $ahkExe = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath).TargetPath
+            $ahkArg = "`"$(Join-Path $PSScriptRoot 'CLIntKey.ahk')`""
+            if (Test-Path $ahkExe) {
+                Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+                    -Name 'CLIntKey' -Value "`"$ahkExe`" $ahkArg"
             }
+            Remove-Item $lnkPath -Force
+            # Swap any instance running from the old path so two handlers
+            # never race for the same key (#SingleInstance only replaces a
+            # copy of the SAME script file).
+            $running = @(Get-CimInstance Win32_Process |
+                Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })
+            foreach ($p in $running | Where-Object { $_.CommandLine -notmatch [regex]::Escape($PSScriptRoot) }) {
+                try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
+            }
+            if ($running.Count -and (Test-Path $ahkExe)) { Start-Process $ahkExe -ArgumentList $ahkArg }
         }
         foreach ($f in @('Install.ps1', 'Uninstall.ps1', 'Update.ps1', 'CLIntKey.ahk', 'CLInt.ico')) {
             Remove-Item (Join-Path $script:rootDir $f) -Force -ErrorAction SilentlyContinue

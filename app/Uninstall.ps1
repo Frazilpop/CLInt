@@ -60,17 +60,31 @@ foreach ($p in @(Get-CimInstance Win32_Process |
     Write-Host "  Stopped the hotkey script (PID $($p.ProcessId))" -ForegroundColor Green
 }
 
-# --- 2. Shortcuts and the staged icon ----------------------------------
+# --- 2. Shortcuts, startup entry and the staged icon -------------------
+# GetFolderPath returns an EMPTY string when a shell folder points
+# somewhere that no longer exists, and Join-Path throws on it - which
+# under ErrorActionPreference 'Stop' would end this uninstall halfway
+# through. Resolve Startup by hand for the same reason Install.ps1 does.
+$startupDir = [Environment]::GetFolderPath('Startup')
+if (-not $startupDir) { $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup' }
+$desktopDir = [Environment]::GetFolderPath('Desktop')
+if (-not $desktopDir) { $desktopDir = Join-Path $env:USERPROFILE 'Desktop' }
+
 $pieces = @(
-    @{ Path = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CLInt.lnk';    What = 'Desktop shortcut' }
-    @{ Path = Join-Path ([Environment]::GetFolderPath('Startup')) 'CLIntKey.lnk'; What = 'Startup hotkey entry' }
-    @{ Path = Join-Path $env:LOCALAPPDATA 'CLInt';                                What = 'Staged icon folder' }
+    @{ Path = Join-Path $desktopDir 'CLInt.lnk';    What = 'Desktop shortcut' }
+    @{ Path = Join-Path $startupDir 'CLIntKey.lnk'; What = 'Startup hotkey shortcut (pre-v0.2.18)' }
+    @{ Path = Join-Path $env:LOCALAPPDATA 'CLInt';  What = 'Staged icon folder' }
 )
 foreach ($piece in $pieces) {
     if (Test-Path $piece.Path) {
         Remove-Item $piece.Path -Recurse -Force -Confirm:$false
         Write-Host "  Removed: $($piece.What)" -ForegroundColor Green
     }
+}
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if ((Get-ItemProperty $runKey -Name 'CLIntKey' -ErrorAction SilentlyContinue)) {
+    Remove-ItemProperty $runKey -Name 'CLIntKey' -Force
+    Write-Host "  Removed: Startup hotkey entry" -ForegroundColor Green
 }
 
 # --- 3. Personal data (optional) ---------------------------------------

@@ -76,6 +76,16 @@ During installation there is the option to bind a global hardware key
 that opens/hides the CLInt menu from anywhere: this requires AutoHotkey v2, which is installed if
 you agree. This can be skipped if you're prefer, and CLInt can still be loaded from the desktop shortcut.
 
+The key press itself does nothing but read `data\clint.hwnd` — the window
+handle CLInt records at startup — so it stays instant, and there is no
+process scanning to be slow or fail. The installer loads the key at logon
+from `HKCU\...\Run`, prefers AutoHotkey's UI Access build (so the key
+still fires when something elevated is in front), and tells you whether
+the hotkey is actually running rather than assuming it is.
+
+Press it and nothing happens? Check the tray for the CLInt icon (its
+tooltip names the bound key). If it isn't there, re-run `Install.bat`.
+
 ## Updating
 
 **SETTINGS → Check for updates**, then press A. Git installs update via
