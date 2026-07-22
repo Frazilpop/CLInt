@@ -1331,26 +1331,55 @@ private struct XINPUT_GAMEPAD { public ushort wButtons; public byte bLeftTrigger
 private struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
 [DllImport("xinput1_4.dll")]
 private static extern uint XInputGetState(uint dwUserIndex, ref XINPUT_STATE pState);
+// The left stick folds into the d-pad bits so menus react to either.
+// Dominant axis only - a tilted up/down scroll must not drift into a
+// tab switch - and engage/release hysteresis so a wobble right at the
+// threshold cannot machine-gun fresh presses.
+private const int ENGAGE = 16384, RELEASE = 10000;
+private static int stickDir = 0;
+public static int StickDpad(int lx, int ly) {
+    int dir = 0;
+    if (Math.Abs(ly) >= Math.Abs(lx)) {
+        if (ly >= ENGAGE) dir = 0x0001; else if (ly <= -ENGAGE) dir = 0x0002;
+    } else {
+        if (lx <= -ENGAGE) dir = 0x0004; else if (lx >= ENGAGE) dir = 0x0008;
+    }
+    if (dir == 0) {
+        int d = stickDir;
+        if ((d == 0x0001 && ly >= RELEASE) || (d == 0x0002 && ly <= -RELEASE) ||
+            (d == 0x0004 && lx <= -RELEASE) || (d == 0x0008 && lx >= RELEASE)) dir = d;
+    }
+    stickDir = dir;
+    return dir;
+}
 public static int GetButtons() {
-    int b = 0;
+    int b = 0, lx = 0, ly = 0;
     var s = new XINPUT_STATE();
     for (uint i = 0; i < 4; i++) {
-        try { if (XInputGetState(i, ref s) == 0) b |= s.Gamepad.wButtons; }
+        try {
+            if (XInputGetState(i, ref s) == 0) {
+                b |= s.Gamepad.wButtons;
+                if (Math.Abs((int)s.Gamepad.sThumbLX) > Math.Abs(lx)) lx = s.Gamepad.sThumbLX;
+                if (Math.Abs((int)s.Gamepad.sThumbLY) > Math.Abs(ly)) ly = s.Gamepad.sThumbLY;
+            }
+        }
         catch (DllNotFoundException) { return -1; }
     }
-    return b;
+    return b | StickDpad(lx, ly);
 }
 '@
 } catch { $script:padOk = $false }
 
 # Button masks -> menu keys; d-pad directions auto-repeat while held.
+# GetButtons already folds the left stick into the d-pad bits, so the
+# stick inherits these mappings (and the repeat rules) for free.
 $PAD_BUTTONS = @(
-    @{ Mask = 0x0001; Key = [ConsoleKey]::UpArrow;    Repeat = $true  }   # d-pad up
-    @{ Mask = 0x0002; Key = [ConsoleKey]::DownArrow;  Repeat = $true  }   # d-pad down
+    @{ Mask = 0x0001; Key = [ConsoleKey]::UpArrow;    Repeat = $true  }   # d-pad/stick up
+    @{ Mask = 0x0002; Key = [ConsoleKey]::DownArrow;  Repeat = $true  }   # d-pad/stick down
     # Left/right only switch tabs, so they must NOT auto-repeat: an empty
     # tab redraws instantly, and a brief hold would repeat and skip past it.
-    @{ Mask = 0x0004; Key = [ConsoleKey]::LeftArrow;  Repeat = $false }   # d-pad left
-    @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # d-pad right
+    @{ Mask = 0x0004; Key = [ConsoleKey]::LeftArrow;  Repeat = $false }   # d-pad/stick left
+    @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # d-pad/stick right
     @{ Mask = 0x1000; Key = [ConsoleKey]::Enter;      Repeat = $false }   # A = launch/open
     @{ Mask = 0x2000; Key = [ConsoleKey]::Escape;     Repeat = $false }   # B = back/quit
     @{ Mask = 0x8000; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # Y = next tab

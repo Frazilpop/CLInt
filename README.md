@@ -60,8 +60,9 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
 
 ## Controls
 
-D-pad up/down to move, left/right (or Y) to switch tabs, A/Enter to
-launch, B to go back/quit, RB to cycle TDP for the highlighted game.
+D-pad or left stick up/down to move, left/right (or Y) to switch tabs,
+A/Enter to launch, B to go back/quit, RB to cycle TDP for the
+highlighted game.
 
 The controller is read natively via XInput. Keyboard works too.
 
