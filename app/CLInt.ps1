@@ -575,6 +575,39 @@ function Show-MenuWindow {
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
 }
 
+# The WELCOME BACK landing screen. Painted by Wait-ForGameExit WHILE the
+# game still runs (the console sits hidden behind it showing the stale
+# LAUNCHING screen, and the instant the game window closes Windows exposes
+# whatever is painted): pre-painting means no exit-detection latency can
+# flash the launch screen at the user. Also called after the wait returns
+# for the rare run where the game never took the screen at all.
+function Draw-LandingScreen($g, [DateTime]$t0) {
+    $mins = [int][Math]::Floor(([DateTime]::Now - $t0).TotalMinutes)
+    $dur  = if ($mins -ge 60)    { "played for $([Math]::Floor($mins / 60))h $($mins % 60)m" }
+            elseif ($mins -ge 1) { "played for $mins min" }
+            else                 { '' }
+    Clear-Host
+    Write-Host ""
+    Write-Host "      _" -ForegroundColor $theme.Accent
+    Write-Host "     /^\      WELCOME BACK" -ForegroundColor $theme.Accent
+    Write-Host "    |___|" -ForegroundColor $theme.Accent
+    Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
+    Write-Host "    |___|     $dur" -ForegroundColor $theme.Accent
+    Write-Host "   /|   |\    GG o7" -ForegroundColor $theme.Info
+    Write-Host "  __^^^^^__" -ForegroundColor $theme.Info
+    Write-Host ""
+}
+
+# VLC's flavour of the same idea, for the same reason.
+function Draw-WrapScreen([string]$name) {
+    Clear-Host
+    Write-Host ""
+    Write-Host "     _____" -ForegroundColor $theme.Accent
+    Write-Host "    | |[] |    THAT'S A WRAP" -ForegroundColor $theme.Accent
+    Write-Host "    |_|___|    $name" -ForegroundColor $theme.Logo
+    Write-Host ""
+}
+
 # --- Mouse input (optional, SETTINGS toggle) ----------------------------
 # conhost reports mouse activity as INPUT_RECORDs in CELL coordinates -
 # the same units everything is drawn in, so no pixel math and no DPI
@@ -1946,7 +1979,7 @@ function Invoke-FirstRunSetup {
     Snap-Selection
 }
 
-function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
+function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [scriptblock]$landing = $null) {
     if ($game.Exe) {
         # Non-Steam shortcut: Steam doesn't track these in the registry,
         # so watch the exe's process instead.
@@ -1959,6 +1992,8 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
         $holdUntil = [DateTime]::Now.AddSeconds(45)
         $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
         $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
+        $waitT0    = [DateTime]::Now
+        $lastLandMin  = -1
         $gameHadFocus = $false
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
             $now = [DateTime]::Now
@@ -1975,6 +2010,24 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
                     if (-not $gameHadFocus) { Hide-MenuForGame }
                 }
             }
+            # While the game holds the screen the console is invisible: paint
+            # the landing screen onto it NOW (re-painting as the minutes tick
+            # so the duration stays current), so the moment the game window
+            # closes what Windows exposes is already the landing screen, not
+            # the stale launch screen - exit-detection latency stops mattering.
+            if ($landing) {
+                try {
+                    $fg = [CLIntFocus.Win]::GetForegroundWindow()
+                    if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) {
+                        $lm = [int]($now - $waitT0).TotalMinutes
+                        if ($lm -ne $lastLandMin) {
+                            & $landing
+                            $lastLandMin = $lm
+                            $script:landingPainted = $true
+                        }
+                    }
+                } catch {}
+            }
             Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
         }
         return
@@ -1989,6 +2042,8 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
     $holdUntil = [DateTime]::Now.AddSeconds(45)
     $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
     $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
+    $waitT0    = [DateTime]::Now
+    $lastLandMin  = -1
     $gameHadFocus = $false
     $gameHwnd  = [IntPtr]::Zero
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
@@ -2009,6 +2064,22 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
                 } catch {}
                 if (-not $gameHadFocus) { Hide-MenuForGame }
             }
+        }
+        # Pre-paint the landing screen onto the hidden console while the game
+        # holds the screen (same reasoning as the exe path above): whatever is
+        # painted here is what the closing game window exposes.
+        if ($landing) {
+            try {
+                $fg = [CLIntFocus.Win]::GetForegroundWindow()
+                if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) {
+                    $lm = [int]($now - $waitT0).TotalMinutes
+                    if ($lm -ne $lastLandMin) {
+                        & $landing
+                        $lastLandMin = $lm
+                        $script:landingPainted = $true
+                    }
+                }
+            } catch {}
         }
         # Steam's Running flag lags the window closing, which parked the
         # user on the stale launch screen for seconds. The window we saw
@@ -2309,16 +2380,14 @@ try {
                     $landedAt = $null
                     if ($isVideo -and $vlcExe) {
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
-                        Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
+                        $script:landingPainted = $false
+                        $wrapSb = { Draw-WrapScreen $v.Name }.GetNewClosure()
+                        Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' }) 0 90 $wrapSb
                         # VLC is gone: get back on screen before the resume-tag
                         # refresh below so the desktop never shows through
                         Show-MenuWindow
-                        Clear-Host
-                        Write-Host ""
-                        Write-Host "     _____" -ForegroundColor $theme.Accent
-                        Write-Host "    | |[] |    THAT'S A WRAP" -ForegroundColor $theme.Accent
-                        Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
-                        Write-Host ""
+                        # pre-painted behind VLC while it played, same as games
+                        if (-not $script:landingPainted) { Draw-WrapScreen $v.Name }
                         $landedAt = [DateTime]::Now
                     } else {
                         Start-Process $v.Path   # default app for this file type
@@ -2374,25 +2443,20 @@ try {
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-SteamGame $g.LaunchId }
-                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 })
+                # GetNewClosure pins $g/$t0 to their values here - the block
+                # runs inside Wait-ForGameExit, and dynamic scoping must not
+                # pick up any same-named local there.
+                $script:landingPainted = $false
+                $landSb = { Draw-LandingScreen $g $t0 }.GetNewClosure()
+                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 }) $landSb
                 # The game is gone: get back on screen BEFORE the TDP revert
-                # and re-sorting below so the desktop never shows through,
-                # and land on a riff of the launch screen while they run.
+                # and re-sorting below so the desktop never shows through.
                 Show-MenuWindow
-                $mins = [int][Math]::Floor(([DateTime]::Now - $t0).TotalMinutes)
-                $dur  = if ($mins -ge 60)    { "played for $([Math]::Floor($mins / 60))h $($mins % 60)m" }
-                        elseif ($mins -ge 1) { "played for $mins min" }
-                        else                 { '' }
-                Clear-Host
-                Write-Host ""
-                Write-Host "      _" -ForegroundColor $theme.Accent
-                Write-Host "     /^\      WELCOME BACK" -ForegroundColor $theme.Accent
-                Write-Host "    |___|" -ForegroundColor $theme.Accent
-                Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
-                Write-Host "    |___|     $dur" -ForegroundColor $theme.Accent
-                Write-Host "   /|   |\    GG o7" -ForegroundColor $theme.Info
-                Write-Host "  __^^^^^__" -ForegroundColor $theme.Info
-                Write-Host ""
+                # Normally the landing screen was pre-painted while we sat
+                # hidden behind the game, so closing it exposed the screen
+                # directly - repainting now would only flicker. Paint here
+                # only if the game never took the screen (e.g. died at launch).
+                if (-not $script:landingPainted) { Draw-LandingScreen $g $t0 }
                 $landedAt = [DateTime]::Now
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
