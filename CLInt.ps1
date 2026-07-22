@@ -53,6 +53,24 @@ function Get-SteamPath {
     return $p -replace '/', '\'
 }
 
+function Start-SteamGame($launchId) {
+    # Firing steam://rungameid/ while Steam is closed boots the full Steam
+    # client UI on top of the menu. Cold-start steam.exe ourselves with
+    # -silent (tray only) and hand it the same URL; the launch is queued
+    # until the client is ready. With Steam already up, the plain URL is
+    # the fastest path and changes nothing.
+    if (Get-Process steam -ErrorAction SilentlyContinue) {
+        Start-Process "steam://rungameid/$launchId"
+    } else {
+        try {
+            Start-Process (Join-Path (Get-SteamPath) 'steam.exe') `
+                -ArgumentList '-silent', "steam://rungameid/$launchId"
+        } catch {
+            Start-Process "steam://rungameid/$launchId"   # no registry path: old behaviour
+        }
+    }
+}
+
 function Get-InstalledGames {
     $steam = Get-SteamPath
     $vdfPath = Join-Path $steam 'steamapps\libraryfolders.vdf'
@@ -1849,7 +1867,7 @@ try {
                 }
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
-                else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
+                else                           { Start-SteamGame $g.LaunchId }
                 Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 })
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
