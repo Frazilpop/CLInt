@@ -21,7 +21,7 @@ A minimalist interface with configurable tabs to load the following:
   tracking the game by its target exe.
 - **VIDEOS** — a folder browser that plays video files. VLC reccomended for play count tracking and auto resume. Other players supported too.
 - **SETTINGS** — deep app customisation,
-  persisted to `settings.json`.
+  persisted to `data\settings.json`.
   
 ## How to Install
 
@@ -29,6 +29,11 @@ Download this folder as a ZIP. Extract anywhere and run `Install.bat`.
 Answer its few questions with the arrow keys and Enter; it creates a
 desktop shortcut (the icon is staged to `%LOCALAPPDATA%\CLInt`) and
 opens CLInt when it finishes.
+
+The folder stays simple: everything you'd run yourself sits at the top
+(`Install.bat`, `Uninstall.bat`, and `Launch.ps1`, which starts CLInt
+without the shortcut). The app's code lives in `app\` and your settings
+and history in `data\` — nothing there needs touching by hand.
 
 Tabs are set up on CLInt's first launch, with the same gamepad-driven
 pickers the SETTINGS tab uses — nothing to type, and everything can be
@@ -49,7 +54,7 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   driver is already loaded), re-asserted just after the game starts
   (Motion Assistant's own auto-TDP would otherwise override it moments
   in) and restored when the game exits. Stored in
-  `tdp-settings.json`. 
+  `data\tdp-settings.json`. 
   
   This feature is auto-detected and hidden if Motion Assistant is not installed.
 

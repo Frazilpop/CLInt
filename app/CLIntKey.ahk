@@ -8,13 +8,13 @@
 ; CLInt.ps1 itself also enforces single-instance, so the two paths
 ; can never race into duplicate windows.
 ;
-; The key comes from menu-key.txt next to this script (one AutoHotkey
-; key name, e.g. "AppsKey", "F13", "vk5D" - written by Install.ps1's
-; optional hotkey setup). No file, or an invalid name, falls back to
-; AppsKey (the GPD Win "page icon" key).
+; The key comes from data\menu-key.txt (one AutoHotkey key name, e.g.
+; "AppsKey", "F13", "vk5D" - written by the installer's optional hotkey
+; setup). No file, or an invalid name, falls back to AppsKey (the GPD
+; Win "page icon" key).
 
 keyName := "AppsKey"
-cfg := A_ScriptDir "\menu-key.txt"
+cfg := A_ScriptDir "\..\data\menu-key.txt"
 if FileExist(cfg) {
     k := Trim(FileRead(cfg), " `t`r`n")
     if (k != "")

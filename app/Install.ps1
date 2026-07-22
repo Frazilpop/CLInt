@@ -1,13 +1,23 @@
-# Install.ps1 - sets up CLInt on this machine.
-# Run this from wherever you've put the CLInt folder;
-# everything stays in this folder, shortcuts just point at it.
+# Install.ps1 - sets up CLInt on this machine (run via Install.bat at the
+# folder root). Everything stays in the CLInt folder, shortcuts just point
+# at it: app code in app\, per-machine data in data\.
 
 $ErrorActionPreference = 'Stop'
-$here = $PSScriptRoot
+$here    = $PSScriptRoot                  # app\
+$root    = Split-Path $here -Parent       # the CLInt folder
+$dataDir = Join-Path $root 'data'
+New-Item -ItemType Directory -Force $dataDir | Out-Null
+# Reinstall over a pre-v0.2.10 layout: carry the data files into data\
+# before anything below looks for them.
+foreach ($f in @('settings.json', 'tdp-settings.json', 'menu-key.txt', 'recent.json',
+                 'watch-history.json', 'update-available.txt', 'error.log')) {
+    $old = Join-Path $root $f
+    if ((Test-Path $old) -and -not (Test-Path (Join-Path $dataDir $f))) { Move-Item $old $dataDir }
+}
 
 Write-Host ""
 Write-Host "  CLInt setup" -ForegroundColor Magenta
-Write-Host "  Installing from: $here"
+Write-Host "  Installing from: $root"
 Write-Host ""
 
 # --- 1. Icon copy on the system drive ---------------------------------
@@ -26,7 +36,7 @@ Write-Host "  Icon staged at $iconDir\CLInt.ico" -ForegroundColor Green
 $wsh = New-Object -ComObject WScript.Shell
 $desktopLnk = $wsh.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'CLInt.lnk'))
 $desktopLnk.TargetPath   = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$desktopLnk.Arguments    = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $here 'Launch.ps1')`""
+$desktopLnk.Arguments    = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $root 'Launch.ps1')`""
 $desktopLnk.IconLocation = "$(Join-Path $iconDir 'CLInt.ico'),0"
 $desktopLnk.Save()
 Write-Host "  Desktop shortcut created: CLInt" -ForegroundColor Green
@@ -63,7 +73,7 @@ function Read-YesNo([string]$Prompt, [bool]$DefaultYes = $true) {
     return (Read-Choice $Prompt @('Yes', 'No') $(if ($DefaultYes) { 0 } else { 1 })) -eq 0
 }
 
-$settingsPath = Join-Path $here 'settings.json'
+$settingsPath = Join-Path $dataDir 'settings.json'
 if (-not (Test-Path $settingsPath)) {
     Write-Host ""
     # Opt-in, matching the SETTINGS default. Written without a Tabs key
@@ -128,7 +138,7 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
         }
         if (-not $ahk) {
             Write-Host "  AutoHotkey not available - skipping the hotkey. Install it from" -ForegroundColor Yellow
-            Write-Host "  https://www.autohotkey.com (v2) and run Install.ps1 again any time." -ForegroundColor Yellow
+            Write-Host "  https://www.autohotkey.com (v2) and run Install.bat again any time." -ForegroundColor Yellow
         }
     }
 
@@ -158,10 +168,10 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
             Write-Host "  Bound: $shown" -ForegroundColor Green
             if ($k.Character -match '[a-zA-Z0-9 ]') {
                 Write-Host "  Heads-up: that's a typing key - it will open the menu EVERY time" -ForegroundColor Yellow
-                Write-Host "  you press it, everywhere. Re-run Install.ps1 to change it." -ForegroundColor Yellow
+                Write-Host "  you press it, everywhere. Re-run Install.bat to change it." -ForegroundColor Yellow
             }
         }
-        Set-Content -Path (Join-Path $here 'menu-key.txt') -Value $keyName -Encoding Ascii
+        Set-Content -Path (Join-Path $dataDir 'menu-key.txt') -Value $keyName -Encoding Ascii
 
         $startupLnk = $wsh.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Startup')) 'CLIntKey.lnk'))
         $startupLnk.TargetPath = $ahk
@@ -173,7 +183,7 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
         Write-Host "  Hotkey is active NOW - press it to test." -ForegroundColor Cyan
     }
 } else {
-    Write-Host "  Skipped. The desktop shortcut does everything; re-run Install.ps1" -ForegroundColor DarkGray
+    Write-Host "  Skipped. The desktop shortcut does everything; re-run Install.bat" -ForegroundColor DarkGray
     Write-Host "  if you want the hotkey later." -ForegroundColor DarkGray
 }
 
@@ -187,10 +197,12 @@ Write-Host "    |/\/\/|"  -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your new friend CLInt says hello" -ForegroundColor Magenta
 Write-Host ""
+# Let the hello land before anything else happens - CLInt's fullscreen
+# window covers this one the moment it opens.
+Start-Sleep -Seconds 2
 Write-Host "  Opening CLInt..." -ForegroundColor DarkGray
-Start-Sleep -Seconds 3
 # Same invocation as the desktop shortcut: Launch.ps1 under a hidden
 # powershell, which starts conhost fullscreen and foregrounds it. The
 # installer window closes by itself right after (no pause in Install.bat).
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
-    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $here 'Launch.ps1')`""
+    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $root 'Launch.ps1')`""

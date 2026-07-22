@@ -1,4 +1,8 @@
 # Per-machine user data
+data/
+
+# Pre-v0.2.10 layout kept the data files at the root; still ignored so
+# old installs stay clean in git until CLInt's first launch migrates them.
 settings.json
 tdp-settings.json
 menu-key.txt

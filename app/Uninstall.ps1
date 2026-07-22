@@ -3,11 +3,12 @@
 # re-running Install.bat brings everything back).
 
 $ErrorActionPreference = 'Stop'
-$here = $PSScriptRoot
+$here = $PSScriptRoot                  # app\
+$root = Split-Path $here -Parent       # the CLInt folder
 
 Write-Host ""
 Write-Host "  CLInt uninstall" -ForegroundColor Magenta
-Write-Host "  Removing the pieces installed from: $here"
+Write-Host "  Removing the pieces installed from: $root"
 Write-Host ""
 
 # Arrow-key chooser, same helper as Install.ps1: up/down moves, Enter picks.
@@ -47,9 +48,9 @@ Write-Host ""
 # and the global hotkey script. Matched by command line, not window title,
 # so a hidden or minimized instance is caught too; killing the powershell
 # closes its conhost window with it.
-$hereRx = [regex]::Escape($here)
+$rootRx = [regex]::Escape($root)
 foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-        Where-Object { $_.CommandLine -match $hereRx -and $_.CommandLine -match '(CLInt|Launch)\.ps1' })) {
+        Where-Object { $_.CommandLine -match $rootRx -and $_.CommandLine -match '(CLInt|Launch)\.ps1' })) {
     try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
     Write-Host "  Stopped running CLInt (PID $($p.ProcessId))" -ForegroundColor Green
 }
@@ -73,14 +74,16 @@ foreach ($piece in $pieces) {
 }
 
 # --- 3. Personal data (optional) ---------------------------------------
-# Settings, histories, per-game TDP, the hotkey binding, error log. Kept
-# by default so a reinstall picks up right where you left off.
+# Settings, histories, per-game TDP, the hotkey binding, error log - the
+# data\ folder, plus root leftovers from the pre-v0.2.10 flat layout.
+# Kept by default so a reinstall picks up right where you left off.
 Write-Host ""
 if (Read-YesNo 'Also delete your settings and history?' $false) {
+    Remove-Item (Join-Path $root 'data') -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
     foreach ($f in @('settings.json', 'tdp-settings.json', 'recent.json',
                      'watch-history.json', 'menu-key.txt', 'error.log',
                      'update-available.txt')) {
-        Remove-Item (Join-Path $here $f) -Force -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $root $f) -Force -Confirm:$false -ErrorAction SilentlyContinue
     }
     Write-Host "  Settings and history deleted." -ForegroundColor Green
 } else {
