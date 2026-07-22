@@ -566,12 +566,16 @@ $script:tabHit = @()            # tab-bar extents recorded by Draw-All: (x0, x1,
 function Set-MouseMode([bool]$on) {
     if (-not $script:mouseOk) { return }
     try {
-        $h = [CLIntMouse.Win]::GetStdHandle(-10)
+        # $hin, NOT $h: locals are visible to every function called beneath
+        # them (dynamic scoping) and names are case-insensitive, so a $h
+        # here would shadow the script's $H (window height) for callees -
+        # that exact collision broke Get-Layout once. Same rule as $w/$W.
+        $hin = [CLIntMouse.Win]::GetStdHandle(-10)
         $mode = [uint32]0
-        if (-not [CLIntMouse.Win]::GetConsoleMode($h, [ref]$mode)) { return }
+        if (-not [CLIntMouse.Win]::GetConsoleMode($hin, [ref]$mode)) { return }
         $mode = if ($on) { ($mode -bor 0x0090) -band 0xFFFFFFBF }   # +mouse +extended-flags, -quick-edit
                 else     { ($mode -bor 0x00C0) -band 0xFFFFFFEF }   # -mouse, quick-edit back on
-        [CLIntMouse.Win]::SetConsoleMode($h, [uint32]$mode) | Out-Null
+        [CLIntMouse.Win]::SetConsoleMode($hin, [uint32]$mode) | Out-Null
     } catch { $script:mouseOk = $false }
 }
 
@@ -1081,7 +1085,10 @@ function Get-Layout {
         }
     } catch {}
     $script:listTop  = 7                       # header block height (6-row logos + gap)
-    $script:visible  = [Math]::Max(1, $H - $listTop - 1)
+    # $script: qualified on the READS too: an unqualified $H here resolves
+    # dynamically and can be shadowed by a caller's local (a $h handle
+    # variable did exactly that) - the geometry must come from script scope.
+    $script:visible  = [Math]::Max(1, $script:H - $script:listTop - 1)
 }
 
 function Draw-GameLine([int]$i) {
@@ -1364,15 +1371,19 @@ function Select-RowAt([int]$y) {
 function Read-MouseEvent {
     if (-not ($script:mouseOk -and $script:mouseEnabled)) { return $null }
     try {
-        $h = [CLIntMouse.Win]::GetStdHandle(-10)
+        # $hin, NOT $h: a $h local here shadows the script's $H (window
+        # height) for every function called below - Switch-Tab -> Draw-All
+        # -> Get-Layout once computed visible = handle - 8 and every draw
+        # after that wrote far outside the buffer (blank/broken screen).
+        $hin = [CLIntMouse.Win]::GetStdHandle(-10)
         while ($true) {
             $n = [uint32]0
-            if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($h, [ref]$n) -or $n -eq 0) { return $null }
+            if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($hin, [ref]$n) -or $n -eq 0) { return $null }
             $r = New-Object CLIntMouse.Rec
             $got = [uint32]0
-            if (-not [CLIntMouse.Win]::PeekConsoleInput($h, [ref]$r, 1, [ref]$got) -or $got -eq 0) { return $null }
+            if (-not [CLIntMouse.Win]::PeekConsoleInput($hin, [ref]$r, 1, [ref]$got) -or $got -eq 0) { return $null }
             if ($r.EventType -ne 2) { return $null }   # a key is in front: ReadKey's turn
-            [CLIntMouse.Win]::ReadConsoleInput($h, [ref]$r, 1, [ref]$got) | Out-Null
+            [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$r, 1, [ref]$got) | Out-Null
             if ($r.Flags -band 4) {   # wheel: plain arrows, so it works in modals too
                 if ($r.Btn -band 0x80000000) { return 'DownArrow' } else { return 'UpArrow' }
             }
@@ -1398,7 +1409,13 @@ function Read-MouseEvent {
             }
             if ((Select-RowAt $r.Y) -ge 0) { return 'Enter' }
         }
-    } catch { return $null }
+    } catch {
+        try {
+            "$(Get-Date -Format s)  mouse: $($_.Exception.Message)`n$($_.ScriptStackTrace)`n" |
+                Add-Content (Join-Path $PSScriptRoot 'error.log')
+        } catch {}
+        return $null
+    }
 }
 
 function Read-InputKey {
