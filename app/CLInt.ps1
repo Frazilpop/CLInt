@@ -542,6 +542,7 @@ try {
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
 } catch {}
@@ -1989,18 +1990,37 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
     $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
     $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
     $gameHadFocus = $false
+    $gameHwnd  = [IntPtr]::Zero
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
         $now = [DateTime]::Now
         if ($now -lt $holdUntil) {
             if ($holdTdpW -and $now -ge $nextTdp) { Assert-Tdp $holdTdpW; $nextTdp = $now.AddSeconds(2) }
             if ($now -ge $graceEnd) {
                 # same quick-quit guard as the exe path above (Steam's Running
-                # flag can lag the window closing by several seconds)
-                if (-not $gameHadFocus) {
-                    try { $gameHadFocus = [CLIntFocus.Win]::GetForegroundWindow() -notin @($script:conHwnd, [IntPtr]::Zero) } catch {}
-                }
+                # flag can lag the window closing by several seconds); keep
+                # re-sampling the handle inside the hold window so a splash
+                # screen handing off to the real game window is tracked
+                try {
+                    $fg = [CLIntFocus.Win]::GetForegroundWindow()
+                    if ($fg -notin @($script:conHwnd, [IntPtr]::Zero)) {
+                        $gameHadFocus = $true
+                        $gameHwnd     = $fg
+                    }
+                } catch {}
                 if (-not $gameHadFocus) { Hide-MenuForGame }
             }
+        }
+        # Steam's Running flag lags the window closing, which parked the
+        # user on the stale launch screen for seconds. The window we saw
+        # holding the foreground IS the game: once it's been destroyed and
+        # the foreground is back on CLInt, the game is over - don't wait
+        # for the flag. (Summoning CLInt over a live game via the hotkey
+        # can't trip this: the game's window still exists then.)
+        if ($gameHwnd -ne [IntPtr]::Zero) {
+            try {
+                if (-not [CLIntFocus.Win]::IsWindow($gameHwnd) -and
+                    [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
+            } catch {}
         }
         Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
     }
