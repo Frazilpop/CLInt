@@ -1957,12 +1957,24 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
         }
         $holdUntil = [DateTime]::Now.AddSeconds(45)
         $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
+        $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
+        $gameHadFocus = $false
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
-            if ([DateTime]::Now -lt $holdUntil) {
-                if ($holdTdpW) { Assert-Tdp $holdTdpW }
-                if ([DateTime]::Now -ge $graceEnd) { Hide-MenuForGame }
+            $now = [DateTime]::Now
+            if ($now -lt $holdUntil) {
+                if ($holdTdpW -and $now -ge $nextTdp) { Assert-Tdp $holdTdpW; $nextTdp = $now.AddSeconds(2) }
+                if ($now -ge $graceEnd) {
+                    # Once the game has verifiably held the foreground, never
+                    # step aside again: on a quick quit the foreground lands
+                    # back on CLInt while this loop still thinks the game is
+                    # running, and minimising then flashes the desktop.
+                    if (-not $gameHadFocus) {
+                        try { $gameHadFocus = [CLIntFocus.Win]::GetForegroundWindow() -notin @($script:conHwnd, [IntPtr]::Zero) } catch {}
+                    }
+                    if (-not $gameHadFocus) { Hide-MenuForGame }
+                }
             }
-            Start-Sleep -Seconds 2
+            Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
         }
         return
     }
@@ -1975,12 +1987,22 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
     }
     $holdUntil = [DateTime]::Now.AddSeconds(45)
     $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
+    $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
+    $gameHadFocus = $false
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
-        if ([DateTime]::Now -lt $holdUntil) {
-            if ($holdTdpW) { Assert-Tdp $holdTdpW }
-            if ([DateTime]::Now -ge $graceEnd) { Hide-MenuForGame }
+        $now = [DateTime]::Now
+        if ($now -lt $holdUntil) {
+            if ($holdTdpW -and $now -ge $nextTdp) { Assert-Tdp $holdTdpW; $nextTdp = $now.AddSeconds(2) }
+            if ($now -ge $graceEnd) {
+                # same quick-quit guard as the exe path above (Steam's Running
+                # flag can lag the window closing by several seconds)
+                if (-not $gameHadFocus) {
+                    try { $gameHadFocus = [CLIntFocus.Win]::GetForegroundWindow() -notin @($script:conHwnd, [IntPtr]::Zero) } catch {}
+                }
+                if (-not $gameHadFocus) { Hide-MenuForGame }
+            }
         }
-        Start-Sleep -Seconds 2
+        Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
     }
 }
 
@@ -2264,20 +2286,35 @@ try {
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
                     if ($script:videoHistEnabled -and $isVideo) { Record-VideoPlay $v.Path }
+                    $landedAt = $null
                     if ($isVideo -and $vlcExe) {
                         Start-Process $vlcExe -ArgumentList '--fullscreen', '--play-and-exit', "`"$($v.Path)`""
                         Wait-ForGameExit ([pscustomobject]@{ Exe = 'vlc.exe' })
+                        # VLC is gone: get back on screen before the resume-tag
+                        # refresh below so the desktop never shows through
+                        Show-MenuWindow
+                        Clear-Host
+                        Write-Host ""
+                        Write-Host "     _____" -ForegroundColor $theme.Accent
+                        Write-Host "    | |[] |    THAT'S A WRAP" -ForegroundColor $theme.Accent
+                        Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
+                        Write-Host ""
+                        $landedAt = [DateTime]::Now
                     } else {
                         Start-Process $v.Path   # default app for this file type
                         Start-Sleep -Seconds 5
+                        Show-MenuWindow
                     }
-                    Show-MenuWindow
                     if ($script:videoHistEnabled) {
                         # refresh tags: VLC has just written its resume state
                         $keep = $selected
                         $cur.Items = @(Get-FileItems $cur)
                         $script:items = $cur.Items
                         $script:selected = [Math]::Min($keep, [Math]::Max(0, $items.Count - 1))
+                    }
+                    if ($landedAt) {
+                        $left = 1500 - ([DateTime]::Now - $landedAt).TotalMilliseconds
+                        if ($left -gt 0) { Start-Sleep -Milliseconds $left }
                     }
                     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                     Draw-All
@@ -2318,6 +2355,25 @@ try {
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-SteamGame $g.LaunchId }
                 Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 })
+                # The game is gone: get back on screen BEFORE the TDP revert
+                # and re-sorting below so the desktop never shows through,
+                # and land on a riff of the launch screen while they run.
+                Show-MenuWindow
+                $mins = [int][Math]::Floor(([DateTime]::Now - $t0).TotalMinutes)
+                $dur  = if ($mins -ge 60)    { "played for $([Math]::Floor($mins / 60))h $($mins % 60)m" }
+                        elseif ($mins -ge 1) { "played for $mins min" }
+                        else                 { '' }
+                Clear-Host
+                Write-Host ""
+                Write-Host "      _" -ForegroundColor $theme.Accent
+                Write-Host "     /^\      WELCOME BACK" -ForegroundColor $theme.Accent
+                Write-Host "    |___|" -ForegroundColor $theme.Accent
+                Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
+                Write-Host "    |___|     $dur" -ForegroundColor $theme.Accent
+                Write-Host "   /|   |\    GG o7" -ForegroundColor $theme.Info
+                Write-Host "  __^^^^^__" -ForegroundColor $theme.Info
+                Write-Host ""
+                $landedAt = [DateTime]::Now
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
                     Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
@@ -2330,10 +2386,11 @@ try {
                     Snap-Selection
                     $script:offset   = 0
                 }
-                # bring the menu window back to the front, drop any keys
-                # pressed while the game was running, and redraw
-                Show-MenuWindow
                 $script:batteryNext = 0   # TDP was restored: refresh the corner readout promptly
+                # let the landing screen land - flashing past it reads as a
+                # glitch - then drop keys pressed meanwhile and redraw
+                $left = 1500 - ([DateTime]::Now - $landedAt).TotalMilliseconds
+                if ($left -gt 0) { Start-Sleep -Milliseconds $left }
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
             }
