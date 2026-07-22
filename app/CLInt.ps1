@@ -618,7 +618,7 @@ function Draw-LandingScreen($g, [DateTime]$t0) {
     Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
     Write-Host "    |___|     $dur" -ForegroundColor $theme.Accent
     Write-Host "   /|   |\    GG o7" -ForegroundColor $theme.Info
-    Write-Host "  __^^^^^__" -ForegroundColor $theme.Info
+    Write-Host "__/_|___|_\__" -ForegroundColor $theme.Info
     Write-Host ""
 }
 
