@@ -96,26 +96,69 @@ function Get-InstalledGames {
     return @($games | Sort-Object Name)
 }
 
+# Steam keeps a userdata folder for every account that has ever signed in
+# on this machine, plus non-numeric stubs ('anonymous', 'ac', '0'). Reading
+# config out of all of them is how long-deleted non-Steam shortcuts come
+# back from the dead - and multiply, once per stale folder. Resolve the one
+# live account instead: the running client's ActiveUser, else the most
+# recently logged-in account in loginusers.vdf.
+$script:steamUserDir = $null
+function Get-SteamUserDir {
+    if ($null -ne $script:steamUserDir) { return $script:steamUserDir }
+    $script:steamUserDir = ''
+    $steam = Get-SteamPath
+    $ids = @()
+    # 0 while the client is closed, so it's a hint and not the whole answer.
+    $active = (Get-ItemProperty "HKCU:\Software\Valve\Steam\ActiveProcess" -ErrorAction SilentlyContinue).ActiveUser
+    if ($active) { $ids += [string]$active }
+    $login = Join-Path $steam 'config\loginusers.vdf'
+    if (Test-Path $login) {
+        $raw = Get-Content $login -Raw
+        $ids += [regex]::Matches($raw, '(?s)"(7656\d{13})"\s*\{(.*?)\}') |
+            ForEach-Object {
+                $ts = [regex]::Match($_.Groups[2].Value, '"Timestamp"\s+"(\d+)"').Groups[1].Value
+                [pscustomobject]@{
+                    # The folder is named after the 32-bit account id, which is
+                    # the SteamID64 minus the base of the individual-account range.
+                    Id = [string]([uint64]$_.Groups[1].Value - 76561197960265728)
+                    Ts = if ($ts) { [int64]$ts } else { 0 }
+                }
+            } | Sort-Object Ts -Descending | ForEach-Object { $_.Id }
+    }
+    foreach ($id in $ids) {
+        $d = Join-Path $steam "userdata\$id"
+        if (Test-Path $d) { $script:steamUserDir = $d; break }
+    }
+    return $script:steamUserDir
+}
+
 function Get-NonSteamGames {
     # Non-Steam shortcuts live in a binary VDF: userdata\<account>\config\shortcuts.vdf.
     # steam://rungameid/ needs the 64-bit shortcut id: (appid << 32) | 0x02000000.
-    $steam = Get-SteamPath
-    $found = foreach ($vdf in (Get-ChildItem (Join-Path $steam 'userdata\*\config\shortcuts.vdf') -ErrorAction SilentlyContinue)) {
-        $raw = [System.Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes($vdf.FullName))
-        foreach ($entry in ($raw -split "\x08\x08")) {
-            $name = [regex]::Match($entry, "(?i)\x01appname\x00([^\x00]*)\x00").Groups[1].Value
-            $idm  = [regex]::Match($entry, "(?is)\x02appid\x00(.{4})")
-            if (-not $name -or -not $idm.Success) { continue }   # pre-2019 entries have no appid field
-            $idBytes = [byte[]]($idm.Groups[1].Value.ToCharArray() | ForEach-Object { [byte]$_ })
-            $appid = [BitConverter]::ToUInt32($idBytes, 0)
-            $exe = [regex]::Match($entry, "(?i)\x01exe\x00([^\x00]*)\x00").Groups[1].Value -replace '"', ''
-            [pscustomobject]@{
-                Name     = $name
-                AppId    = $appid
-                LaunchId = ([uint64]$appid -shl 32) -bor 0x02000000
-                Exe      = $exe
-                Dir      = $null
-            }
+    $dir = Get-SteamUserDir
+    if (-not $dir) { return @() }
+    $vdf = Join-Path $dir 'config\shortcuts.vdf'
+    if (-not (Test-Path $vdf)) { return @() }
+    $raw = [System.Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes($vdf))
+    $seen = @{}
+    $found = foreach ($entry in ($raw -split "\x08\x08")) {
+        $name = [regex]::Match($entry, "(?i)\x01appname\x00([^\x00]*)\x00").Groups[1].Value
+        $idm  = [regex]::Match($entry, "(?is)\x02appid\x00(.{4})")
+        if (-not $name -or -not $idm.Success) { continue }   # pre-2019 entries have no appid field
+        $idBytes = [byte[]]($idm.Groups[1].Value.ToCharArray() | ForEach-Object { [byte]$_ })
+        $appid = [BitConverter]::ToUInt32($idBytes, 0)
+        # Entries written before Steam stored a real appid keep a zero one and
+        # the client derives the id at runtime; rungameid can't launch those,
+        # so they would only ever be dead rows in the list.
+        if ($appid -eq 0 -or $seen.ContainsKey($appid)) { continue }
+        $seen[$appid] = $true
+        $exe = [regex]::Match($entry, "(?i)\x01exe\x00([^\x00]*)\x00").Groups[1].Value -replace '"', ''
+        [pscustomobject]@{
+            Name     = $name
+            AppId    = $appid
+            LaunchId = ([uint64]$appid -shl 32) -bor 0x02000000
+            Exe      = $exe
+            Dir      = $null
         }
     }
     return @($found | Sort-Object Name)
@@ -131,8 +174,8 @@ function Get-SteamCollections {
     if ($null -ne $script:steamCols) { return $script:steamCols }
     $cols = @{}
     try {
-        $steam = Get-SteamPath
-        foreach ($f in (Get-ChildItem (Join-Path $steam 'userdata\*\config\cloudstorage\cloud-storage-namespace-*.json') -ErrorAction SilentlyContinue)) {
+        $dir = Get-SteamUserDir   # live account only - stale ones list collections that no longer exist
+        foreach ($f in (Get-ChildItem (Join-Path $dir 'config\cloudstorage\cloud-storage-namespace-*.json') -ErrorAction SilentlyContinue)) {
             try {
                 foreach ($e in (Get-Content $f.FullName -Raw | ConvertFrom-Json)) {
                     $key = if ($e -is [array]) { [string]$e[0] } else { [string]$e.key }
