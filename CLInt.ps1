@@ -1198,7 +1198,9 @@ function Draw-All {
         if ($x + $txt.Length -ge $W) { break }   # belt and braces
         if ($t -eq $tab) { Write-At $x 0 $txt $theme.SelFg $theme.Accent }
         else             { Write-At $x 0 $txt $theme.Hint }
-        $script:tabHit += ,@($x, $x + $txt.Length - 1, $t)
+        # parens matter: PS's comma binds tighter than +/- ("$a, $a + 1"
+        # builds an array THEN adds), which broke startup here once
+        $script:tabHit += ,@($x, ($x + $txt.Length - 1), $t)
         $x += $txt.Length + $gap
     }
     $nReal = @($items | Where-Object { -not $_.Unselectable }).Count   # section rows aren't games
