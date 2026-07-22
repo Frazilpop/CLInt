@@ -187,8 +187,10 @@ Write-Host "    |/\/\/|"  -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your new friend CLInt says hello" -ForegroundColor Magenta
 Write-Host ""
-Read-Host "  Press Enter to open CLInt"
+Write-Host "  Opening CLInt..." -ForegroundColor DarkGray
+Start-Sleep -Seconds 3
 # Same invocation as the desktop shortcut: Launch.ps1 under a hidden
-# powershell, which starts conhost fullscreen and foregrounds it.
+# powershell, which starts conhost fullscreen and foregrounds it. The
+# installer window closes by itself right after (no pause in Install.bat).
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
     "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $here 'Launch.ps1')`""
