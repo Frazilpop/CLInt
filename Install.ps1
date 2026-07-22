@@ -31,66 +31,47 @@ $desktopLnk.IconLocation = "$(Join-Path $iconDir 'CLInt.ico'),0"
 $desktopLnk.Save()
 Write-Host "  Desktop shortcut created: CLInt" -ForegroundColor Green
 
-# --- 3. First-run tab setup -------------------------------------------
-# Only on a fresh install: an existing settings.json is left untouched.
-# Everything chosen here can be changed later in the SETTINGS tab.
+# --- 3. First-run options ----------------------------------------------
+# Tab and folder setup happens inside CLInt itself on first launch - its
+# gamepad-driven pickers beat typed console prompts. The installer only
+# asks what makes sense before the app ever runs.
 
-# Enter = default, B = Windows folder-browse dialog, '-' = skip (returns $null).
-# Typing a path still works, but nobody should have to.
-function Select-Folder([string]$Prompt, [string]$Default) {
+# Arrow-key chooser: up/down moves, Enter picks. Returns the index.
+# Typed y/n answers tripped people up - a visible selector can't.
+function Read-Choice([string]$Prompt, [string[]]$Options, [int]$Default = 0) {
+    Write-Host "  $Prompt " -ForegroundColor Cyan -NoNewline
+    Write-Host "(up/down + Enter)" -ForegroundColor DarkGray
+    # Print the option lines once so the buffer scrolls if it has to,
+    # then repaint them in place as the selection moves.
+    $Options | ForEach-Object { Write-Host "" }
+    $top = [Console]::CursorTop - $Options.Count
+    $sel = $Default
     while ($true) {
-        $ans = Read-Host "  $Prompt [Enter = $Default, B = browse, '-' = skip]"
-        if ($ans -eq '-') { return $null }
-        if (-not $ans) { return $Default }
-        if ($ans -match '^[bB]$') {
-            Add-Type -AssemblyName System.Windows.Forms
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            $dlg.Description = $Prompt
-            $dlg.ShowNewFolderButton = $true
-            if (Test-Path $Default) { $dlg.SelectedPath = $Default }
-            # TopMost owner keeps the dialog from opening behind the console.
-            $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
-            $result = $dlg.ShowDialog($owner)
-            $owner.Dispose()
-            if ($result -eq 'OK') { return $dlg.SelectedPath }
-            continue   # cancelled the dialog - ask again
+        for ($i = 0; $i -lt $Options.Count; $i++) {
+            [Console]::SetCursorPosition(0, ($top + $i))
+            if ($i -eq $sel) { Write-Host "    > $($Options[$i])" -ForegroundColor Magenta -NoNewline }
+            else             { Write-Host "      $($Options[$i])" -ForegroundColor DarkGray -NoNewline }
         }
-        return $ans
+        switch (([Console]::ReadKey($true)).Key) {
+            'UpArrow'   { $sel = ($sel - 1 + $Options.Count) % $Options.Count }
+            'DownArrow' { $sel = ($sel + 1) % $Options.Count }
+            'Enter'     { [Console]::SetCursorPosition(0, ($top + $Options.Count)); return $sel }
+        }
     }
+}
+function Read-YesNo([string]$Prompt, [bool]$DefaultYes = $true) {
+    return (Read-Choice $Prompt @('Yes', 'No') $(if ($DefaultYes) { 0 } else { 1 })) -eq 0
 }
 
 $settingsPath = Join-Path $here 'settings.json'
 if (-not (Test-Path $settingsPath)) {
     Write-Host ""
-    Write-Host "  Let's set up your tabs (all changeable later in SETTINGS)." -ForegroundColor Cyan
-    $tabs = @()
-
-    $steamAns = Read-Host "  Include a Steam games tab? [Y/n]"
-    if ($steamAns -notmatch '^[nN]') { $tabs += @{ Type = 'Steam' } }
-
-    $shortDef = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts'
-    $p = Select-Folder 'Folder for a game/app shortcuts tab' $shortDef
-    if ($null -ne $p) {
-        if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force $p | Out-Null }
-        $tabs += @{ Type = 'Shortcuts'; Path = $p }
-        Write-Host "  Shortcuts tab: $p" -ForegroundColor Green
-    }
-
-    $vidDef = [Environment]::GetFolderPath('MyVideos')
-    $p = Select-Folder 'Folder for a videos/files tab' $vidDef
-    if ($null -ne $p) {
-        $tabs += @{ Type = 'Files'; Path = $p }
-        Write-Host "  Videos/files tab: $p" -ForegroundColor Green
-    }
-
-    # Launch-time update check: opt-in, matching the SETTINGS default.
-    Write-Host ""
-    $updAns = Read-Host "  Check for updates when CLInt starts? [y/N]"
-    $autoUpd = $updAns -match '^[yY]'
-
-    @{ Tabs = $tabs; AutoUpdateCheck = $autoUpd } | ConvertTo-Json -Depth 5 | Set-Content $settingsPath -Encoding utf8
-    Write-Host "  Tabs saved: $($tabs.Count) configured." -ForegroundColor Green
+    # Opt-in, matching the SETTINGS default. Written without a Tabs key
+    # so CLInt's own first-launch setup still runs.
+    $autoUpd = Read-YesNo 'Check for updates when CLInt starts?' $false
+    @{ AutoUpdateCheck = $autoUpd } | ConvertTo-Json | Set-Content $settingsPath -Encoding utf8
     Write-Host "  Update check at launch: $(if ($autoUpd) { 'on' } else { 'off' })" -ForegroundColor Green
+    Write-Host "  Tabs get set up in CLInt itself, on first launch." -ForegroundColor Green
 } else {
     Write-Host "  Existing settings.json found - keeping your current tabs." -ForegroundColor Green
 }
@@ -113,8 +94,7 @@ if ($vlcFound) {
     Write-Host "  VLC not detected. CLInt works without it, but with VLC videos" -ForegroundColor Yellow
     Write-Host "  play fullscreen, the menu returns when a video ends, and" -ForegroundColor Yellow
     Write-Host "  partially-watched markers work. (videolan.org)" -ForegroundColor Yellow
-    $wantVlc = Read-Host "  Install VLC via winget now? [y/N]"
-    if ($wantVlc -match '^[yY]') {
+    if (Read-YesNo 'Install VLC via winget now?' $false) {
         try {
             winget install --id VideoLAN.VLC --accept-source-agreements --accept-package-agreements
         } catch {}
@@ -136,13 +116,11 @@ function Find-Ahk {
 }
 
 Write-Host ""
-$wantKey = Read-Host "  Bind a hardware key that opens/hides the menu from anywhere? [Y/n]"
-if ($wantKey -notmatch '^[nN]') {
+if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
 
     $ahk = Find-Ahk
     if (-not $ahk) {
-        $wantAhk = Read-Host "  That needs AutoHotkey v2, which isn't installed. Install it via winget? [Y/n]"
-        if ($wantAhk -notmatch '^[nN]') {
+        if (Read-YesNo "That needs AutoHotkey v2, which isn't installed. Install it via winget?") {
             try {
                 winget install --id AutoHotkey.AutoHotkey --accept-source-agreements --accept-package-agreements
             } catch {}
@@ -209,4 +187,8 @@ Write-Host "    |/\/\/|"  -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Your new friend CLInt says hello" -ForegroundColor Magenta
 Write-Host ""
-Read-Host "  Press Enter to close"
+Read-Host "  Press Enter to open CLInt"
+# Same invocation as the desktop shortcut: Launch.ps1 under a hidden
+# powershell, which starts conhost fullscreen and foregrounds it.
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList `
+    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $here 'Launch.ps1')`""

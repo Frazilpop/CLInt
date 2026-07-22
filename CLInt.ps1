@@ -214,19 +214,31 @@ if (Test-Path $settingsFile) {
     (Get-Content $settingsFile -Raw | ConvertFrom-Json).PSObject.Properties |
         ForEach-Object { $settings[$_.Name] = $_.Value }
 }
+$firstRunSetup = $false
 if (-not $settings.ContainsKey('Tabs')) {
-    # First run - or migration from the fixed-tab era's two folder keys.
     # (Key-existence check, not truthiness: an empty Tabs array is a valid
     # deliberate config - all tabs removed - and must not resurrect defaults.)
-    $shortcutDir = if ($settings['LocalShortcutDir']) { $settings['LocalShortcutDir'] }
-                   else { Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts' }
-    $filesDir    = if ($settings['VideoRoot']) { $settings['VideoRoot'] }
-                   else { [Environment]::GetFolderPath('MyVideos') }
-    $settings['Tabs'] = @(
-        @{ Type = 'Steam' }
-        @{ Type = 'Shortcuts'; Path = $shortcutDir }
-        @{ Type = 'Files';     Path = $filesDir }
-    )
+    if ($settings['LocalShortcutDir'] -or $settings['VideoRoot']) {
+        # Migration from the fixed-tab era's two folder keys.
+        $shortcutDir = if ($settings['LocalShortcutDir']) { $settings['LocalShortcutDir'] }
+                       else { Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts' }
+        $filesDir    = if ($settings['VideoRoot']) { $settings['VideoRoot'] }
+                       else { [Environment]::GetFolderPath('MyVideos') }
+        $settings['Tabs'] = @(
+            @{ Type = 'Steam' }
+            @{ Type = 'Shortcuts'; Path = $shortcutDir }
+            @{ Type = 'Files';     Path = $filesDir }
+        )
+    } else {
+        # True first run (fresh install, or after a settings reset): seed a
+        # Steam tab if Steam is on this machine, and let the in-app setup
+        # offer the folder tabs once the UI is up - its gamepad pickers are
+        # the right tool, not installer-console prompts.
+        $script:firstRunSetup = $true
+        $steamHere = $false
+        try { $steamHere = [bool](Get-SteamPath) } catch {}
+        $settings['Tabs'] = if ($steamHere) { ,@{ Type = 'Steam' } } else { @() }
+    }
 }
 $settings.Remove('LocalShortcutDir'); $settings.Remove('VideoRoot')
 # 'Fullscreen' was once persisted by the toggle; a stored 'false' made
@@ -1569,6 +1581,45 @@ function Add-TabConfig {
     }
 }
 
+# First launch with no tab config (fresh install, or right after a full
+# settings reset): offer the two folder tabs using the same pickers
+# SETTINGS uses. A Steam tab is already seeded when Steam is installed;
+# everything here is skippable and available later via SETTINGS > add a tab.
+function Invoke-FirstRunSetup {
+    $desk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Game Shortcuts'
+    $c = Pick-Option 'WELCOME TO CLINT  --  ADD A SHORTCUTS TAB?  (launches .lnk shortcuts you drop in a folder)' @(
+        "Yes - use $desk",
+        'Yes - pick a folder',
+        'No  (tabs can be added any time in SETTINGS)')
+    if ($c -eq 0) {
+        if (-not (Test-Path $desk)) { New-Item -ItemType Directory -Force $desk | Out-Null }
+        $settings['Tabs'] += @{ Type = 'Shortcuts'; Path = $desk }
+    } elseif ($c -eq 1) {
+        $p = Pick-Folder 'folder with .lnk shortcuts' ([Environment]::GetFolderPath('Desktop'))
+        if ($p) { $settings['Tabs'] += @{ Type = 'Shortcuts'; Path = $p } }
+    }
+    $vids = [Environment]::GetFolderPath('MyVideos')
+    $c = Pick-Option 'WELCOME TO CLINT  --  ADD A VIDEOS / FILES TAB?  (browse a folder, play videos)' @(
+        "Yes - use $vids",
+        'Yes - pick a folder',
+        'No  (tabs can be added any time in SETTINGS)')
+    if ($c -eq 0) {
+        $settings['Tabs'] += @{ Type = 'Files'; Path = $vids }
+    } elseif ($c -eq 1) {
+        $p = Pick-Folder 'folder to browse' $vids
+        if ($p) { $settings['Tabs'] += @{ Type = 'Files'; Path = $p } }
+    }
+    # Persist even all-skips: settings.json gains the Tabs key, so this
+    # setup runs exactly once.
+    Save-Settings
+    Build-Tabs
+    $script:tab      = 0
+    $script:items    = @(Get-TabItems 0)
+    $script:selected = 0
+    $script:offset   = 0
+    Snap-Selection
+}
+
 function Wait-ForGameExit($game, [int]$holdTdpW = 0) {
     if ($game.Exe) {
         # Non-Steam shortcut: Steam doesn't track these in the registry,
@@ -1650,6 +1701,11 @@ try {
     # Enter that opened it), otherwise it instantly launches the first game.
     Start-Sleep -Milliseconds 400
     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
+    if ($script:firstRunSetup) {
+        $script:firstRunSetup = $false
+        Invoke-FirstRunSetup
+        Draw-All
+    }
     while ($true) {
         $key = Read-InputKey
         $cur = $tabs[$tab]

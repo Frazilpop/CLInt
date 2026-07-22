@@ -25,8 +25,14 @@ A minimalist interface with configurable tabs to load the following:
   
 ## How to Install
 
-Download this folder as a ZIP. Extract anywhere and run
-`Install.bat`. The installer copies the icon to `%LOCALAPPDATA%\CLInt`
+Download this folder as a ZIP. Extract anywhere and run `Install.bat`.
+Answer its few questions with the arrow keys and Enter; it creates a
+desktop shortcut (the icon is staged to `%LOCALAPPDATA%\CLInt`) and
+opens CLInt when it finishes.
+
+Tabs are set up on CLInt's first launch, with the same gamepad-driven
+pickers the SETTINGS tab uses — nothing to type, and everything can be
+changed later in SETTINGS.
 
 ## TDP – Motion Assistant support (for WIN GPD Devices)
 
