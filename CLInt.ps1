@@ -493,9 +493,39 @@ try {
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
 } catch {}
+
+# A just-launched game can be denied activation by Windows' focus-steal
+# protection and sit invisible BEHIND the fullscreen menu (seen when Steam
+# is cold-started silently in the tray). We hold the foreground, so step
+# aside: minimise ourselves and Windows activates the game window on top.
+function Hide-MenuForGame {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    try {
+        if ([CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) {
+            [CLIntFocus.Win]::ShowWindow($script:conHwnd, 6) | Out-Null   # SW_MINIMIZE
+        }
+    } catch {}
+}
+
+# Bring the menu back after a game/video: un-minimise only if we stepped
+# aside (SW_RESTORE on a non-iconic window would drop the fullscreen
+# display mode), then take the foreground back.
+function Show-MenuWindow {
+    if ($script:conHwnd -ne [IntPtr]::Zero) {
+        try {
+            if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) {
+                [CLIntFocus.Win]::ShowWindow($script:conHwnd, 9) | Out-Null   # SW_RESTORE
+            }
+            [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null
+        } catch {}
+    }
+    try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+}
 
 # The mascot catalog. Every tab shows one of these; a tab's icon can be
 # chosen in SETTINGS (stored as "Icon": "<name>" in settings.json) or is
@@ -1620,33 +1650,41 @@ function Invoke-FirstRunSetup {
     Snap-Selection
 }
 
-function Wait-ForGameExit($game, [int]$holdTdpW = 0) {
+function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90) {
     if ($game.Exe) {
         # Non-Steam shortcut: Steam doesn't track these in the registry,
         # so watch the exe's process instead.
         $proc = [System.IO.Path]::GetFileNameWithoutExtension($game.Exe)
-        $deadline = [DateTime]::Now.AddSeconds(90)
+        $deadline = [DateTime]::Now.AddSeconds($startTimeoutS)
         while ([DateTime]::Now -lt $deadline) {
             if (Get-Process -Name $proc -ErrorAction SilentlyContinue) { break }
             Start-Sleep -Milliseconds 500
         }
         $holdUntil = [DateTime]::Now.AddSeconds(45)
+        $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
-            if ($holdTdpW -and [DateTime]::Now -lt $holdUntil) { Assert-Tdp $holdTdpW }
+            if ([DateTime]::Now -lt $holdUntil) {
+                if ($holdTdpW) { Assert-Tdp $holdTdpW }
+                if ([DateTime]::Now -ge $graceEnd) { Hide-MenuForGame }
+            }
             Start-Sleep -Seconds 2
         }
         return
     }
     # Steam flips this registry value to 1 while the game is running.
     $key = "HKCU:\Software\Valve\Steam\Apps\$($game.AppId)"
-    $deadline = [DateTime]::Now.AddSeconds(90)
+    $deadline = [DateTime]::Now.AddSeconds($startTimeoutS)
     while ([DateTime]::Now -lt $deadline) {
         if ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) { break }
         Start-Sleep -Milliseconds 500
     }
     $holdUntil = [DateTime]::Now.AddSeconds(45)
+    $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
-        if ($holdTdpW -and [DateTime]::Now -lt $holdUntil) { Assert-Tdp $holdTdpW }
+        if ([DateTime]::Now -lt $holdUntil) {
+            if ($holdTdpW) { Assert-Tdp $holdTdpW }
+            if ([DateTime]::Now -ge $graceEnd) { Hide-MenuForGame }
+        }
         Start-Sleep -Seconds 2
     }
 }
@@ -1927,7 +1965,7 @@ try {
                         Start-Process $v.Path   # default app for this file type
                         Start-Sleep -Seconds 5
                     }
-                    try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+                    Show-MenuWindow
                     if ($script:videoHistEnabled) {
                         # refresh tags: VLC has just written its resume state
                         $keep = $selected
@@ -1964,10 +2002,16 @@ try {
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
                     Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
+                $steamCold = $cur.Type -eq 'Steam' -and
+                             -not (Get-Process steam -ErrorAction SilentlyContinue)
+                if ($steamCold) {
+                    Write-Host ""
+                    Write-Host "   Steam is starting in the background - this launch takes a little longer" -ForegroundColor $theme.Notice
+                }
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-SteamGame $g.LaunchId }
-                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 })
+                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 })
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
                     Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
@@ -1982,7 +2026,7 @@ try {
                 }
                 # bring the menu window back to the front, drop any keys
                 # pressed while the game was running, and redraw
-                try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+                Show-MenuWindow
                 $script:batteryNext = 0   # TDP was restored: refresh the corner readout promptly
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
