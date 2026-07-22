@@ -17,13 +17,23 @@ if (-not $List) {
     try { $owned = $script:instanceMutex.WaitOne(0) } catch { $owned = $true }   # abandoned mutex = ours now
     if (-not $owned) {
         Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 '@
-        $hwnd = [Win32.Native]::FindWindowW($null, 'CLInt')
+        # Find the running menu by OWNER, not window title - other consoles
+        # sitting in a folder named CLInt carry the identical title (see
+        # Launch.ps1). The menu is the powershell running CLInt.ps1.
+        $hwnd = [IntPtr]::Zero
+        try {
+            foreach ($p in Get-CimInstance Win32_Process -Filter "Name='powershell.exe'") {
+                if ($p.ProcessId -ne $PID -and $p.CommandLine -like '*CLInt.ps1*') {
+                    $wnd = (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle
+                    if ([int64]$wnd -ne 0) { $hwnd = $wnd; break }
+                }
+            }
+        } catch {}
         if ($hwnd -ne [IntPtr]::Zero) {
             # Minimized wins over "foreground" - see Launch.ps1.
             if ([Win32.Native]::IsIconic($hwnd)) {
@@ -39,7 +49,7 @@ if (-not $List) {
     }
 }
 
-$Host.UI.RawUI.WindowTitle = 'CLInt'   # matched by Launch.ps1, CLIntKey.ahk and claude-gamepad.ahk
+$Host.UI.RawUI.WindowTitle = 'CLInt'   # first-pass filter for CLIntKey.ahk's finder (which verifies the owner process) and matched by claude-gamepad.ahk
 
 # ------------------------------------------------------ Folder layout ---
 # The app's code lives in app\, per-machine data in data\, and the root
@@ -596,7 +606,8 @@ function Show-MenuWindow {
             [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null
         } catch {}
     }
-    try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+    # AppActivate by OWN PID, never by title - other consoles can share it.
+    try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
 }
 
 # The WELCOME BACK landing screen. Painted by Wait-ForGameExit WHILE the
@@ -2152,7 +2163,7 @@ try {
     if ($script:conHwnd -ne [IntPtr]::Zero) {
         try { [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null } catch {}
     }
-    try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
+    try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
     Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
     Set-MouseMode $mouseEnabled
     # Opt-in quiet update check: a hidden helper compares versions and

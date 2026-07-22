@@ -6,15 +6,28 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
-[DllImport("user32.dll", CharSet = CharSet.Unicode)]
-public static extern IntPtr FindWindowW(string cls, string title);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 '@
 
-$hwnd = [Win32.Native]::FindWindowW($null, 'CLInt')
+# Find the menu by OWNER, not by window title: any other console sitting in
+# a folder named CLInt (a dev shell, Claude Code's own conhost) carries the
+# identical title, and title-matching used to grab whichever was higher in
+# z-order. Console windows report the attached shell's PID, so the real
+# menu is the powershell whose command line is running CLInt.ps1.
+function Find-CLIntWindow {
+    foreach ($p in Get-CimInstance Win32_Process -Filter "Name='powershell.exe'") {
+        if ($p.ProcessId -ne $PID -and $p.CommandLine -like '*CLInt.ps1*') {
+            $wnd = (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle
+            if ([int64]$wnd -ne 0) { return $wnd }   # 0 = hidden or gone (e.g. a test probe)
+        }
+    }
+    return [IntPtr]::Zero
+}
+
+$hwnd = Find-CLIntWindow
 if ($hwnd -ne [IntPtr]::Zero) {
     # Minimized wins over "foreground": right after minimizing, Windows can
     # still report the window as foreground, which made a second press no-op.
@@ -38,7 +51,7 @@ Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList `
 # with the previous app still eating gamepad input; activate it explicitly.
 for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 250
-    $new = [Win32.Native]::FindWindowW($null, 'CLInt')
+    $new = Find-CLIntWindow
     if ($new -ne [IntPtr]::Zero) {
         [Win32.Native]::SetForegroundWindow($new) | Out-Null
         break
