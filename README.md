@@ -60,6 +60,10 @@ launch, B to go back/quit, RB to cycle TDP for the highlighted game.
 
 The controller is read natively via XInput. Keyboard works too.
 
+The mouse works as well: hover to highlight, click to launch, click a
+tab name to switch to it, and scroll with the wheel. It can be turned
+off with **SETTINGS → Mouse support**.
+
 ## HotKey
 
 During installation there is the option to bind a global hardware key

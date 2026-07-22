@@ -527,6 +527,54 @@ function Show-MenuWindow {
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
 }
 
+# --- Mouse input (optional, SETTINGS toggle) ----------------------------
+# conhost reports mouse activity as INPUT_RECORDs in CELL coordinates -
+# the same units everything is drawn in, so no pixel math and no DPI
+# involvement. Quick-Edit mode must be off while mouse input is on (it
+# swallows every event for text selection); it is put back when the
+# toggle is turned off.
+$script:mouseOk = $false
+try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CLIntMouse {
+    [StructLayout(LayoutKind.Explicit)]
+    public struct Rec {
+        [FieldOffset(0)]  public ushort EventType;   // 1 = key, 2 = mouse
+        [FieldOffset(4)]  public short  X;           // cell coords
+        [FieldOffset(6)]  public short  Y;
+        [FieldOffset(8)]  public uint   Btn;         // bit 0 = left; wheel delta in the high word
+        [FieldOffset(12)] public uint   Ctrl;
+        [FieldOffset(16)] public uint   Flags;       // 0 press/release, 1 move, 2 double-click, 4 wheel
+    }
+    public static class Win {
+        [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
+        [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint mode);
+        [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint mode);
+        [DllImport("kernel32.dll")] public static extern bool GetNumberOfConsoleInputEvents(IntPtr h, out uint n);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool PeekConsoleInput(IntPtr h, out Rec r, uint len, out uint read);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool ReadConsoleInput(IntPtr h, out Rec r, uint len, out uint read);
+    }
+}
+'@
+    $script:mouseOk = $true
+} catch {}
+$script:mouseLeftWas = $false   # last seen left-button state, for press-edge detection
+$script:tabHit = @()            # tab-bar extents recorded by Draw-All: (x0, x1, index)
+
+function Set-MouseMode([bool]$on) {
+    if (-not $script:mouseOk) { return }
+    try {
+        $h = [CLIntMouse.Win]::GetStdHandle(-10)
+        $mode = [uint32]0
+        if (-not [CLIntMouse.Win]::GetConsoleMode($h, [ref]$mode)) { return }
+        $mode = if ($on) { ($mode -bor 0x0090) -band 0xFFFFFFBF }   # +mouse +extended-flags, -quick-edit
+                else     { ($mode -bor 0x00C0) -band 0xFFFFFFEF }   # -mouse, quick-edit back on
+        [CLIntMouse.Win]::SetConsoleMode($h, [uint32]$mode) | Out-Null
+    } catch { $script:mouseOk = $false }
+}
+
 # The mascot catalog. Every tab shows one of these; a tab's icon can be
 # chosen in SETTINGS (stored as "Icon": "<name>" in settings.json) or is
 # auto-assigned: the classic face for the first tab of its type, then the
@@ -629,6 +677,7 @@ $showClock     = $settings['ShowClock']       -ne $false
 $showBattery   = $settings['ShowBattery']     -ne $false
 $recentEnabled = $settings['Recent']          -ne $false
 $autoCheck     = $settings['AutoUpdateCheck'] -eq $true
+$mouseEnabled  = $settings['Mouse']           -ne $false
 $inModal = $false        # modals suppress the idle clock/battery repaint
 $batteryPct = -1
 $batteryNext = 0
@@ -906,6 +955,8 @@ function Get-SettingsItems {
                                 Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'AutoCheck'
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Mouse'
+                                Name = ('Mouse support'.PadRight(30) + $(if ($script:mouseEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'TextSize'
                                 Name = ('Text size'.PadRight(30) + $script:textSizeName) }
     $list += [pscustomobject]@{ Key = 'Theme'
@@ -1141,11 +1192,13 @@ function Draw-All {
         })
     }
     $padStr = ' ' * $padLen
+    $script:tabHit = @()   # extents for mouse hit-testing, cell coords
     for ($t = 0; $t -lt $tabs.Count; $t++) {
         $txt = $padStr + $names[$t] + $padStr
         if ($x + $txt.Length -ge $W) { break }   # belt and braces
         if ($t -eq $tab) { Write-At $x 0 $txt $theme.SelFg $theme.Accent }
         else             { Write-At $x 0 $txt $theme.Hint }
+        $script:tabHit += ,@($x, $x + $txt.Length - 1, $t)
         $x += $txt.Length + $gap
     }
     $nReal = @($items | Where-Object { -not $_.Unselectable }).Count   # section rows aren't games
@@ -1282,8 +1335,74 @@ function Get-PadKey {
 # Blocking wait for the next input, whichever device it comes from.
 # Returns a [ConsoleKey], so callers switch on it exactly like .Key.
 $script:bufferCheckNext = 0
+# Cell row -> selectable item index, moving the selection bar there.
+# Returns the index, or -1 when the row holds no selectable item. Edge
+# rows double as the scroll-hint rows, so any repaint re-stamps them.
+function Select-RowAt([int]$y) {
+    $i = $script:offset + ($y - $script:listTop)
+    if ($y -lt $script:listTop -or $y -ge $script:listTop + $script:visible -or
+        $i -ge $script:items.Count -or $script:items[$i].Unselectable) { return -1 }
+    if ($i -ne $script:selected) {
+        $old = $script:selected
+        $script:selected = $i
+        Draw-GameLine $old
+        Draw-GameLine $i
+        Draw-ScrollHints
+    }
+    return $i
+}
+
+# Drain queued mouse events. They share the input buffer with key events -
+# and [Console]::KeyAvailable silently throws away whatever non-key events
+# sit in front of it - so this must run FIRST in the input loop. Hover
+# moves the selection, a left click activates (returned as 'Enter'), a
+# click on the tab bar switches tabs, the wheel maps onto the arrows.
+# Inside modals events are consumed and dropped: the main-screen geometry
+# used here does not apply there.
+function Read-MouseEvent {
+    if (-not ($script:mouseOk -and $script:mouseEnabled)) { return $null }
+    try {
+        $h = [CLIntMouse.Win]::GetStdHandle(-10)
+        while ($true) {
+            $n = [uint32]0
+            if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($h, [ref]$n) -or $n -eq 0) { return $null }
+            $r = New-Object CLIntMouse.Rec
+            $got = [uint32]0
+            if (-not [CLIntMouse.Win]::PeekConsoleInput($h, [ref]$r, 1, [ref]$got) -or $got -eq 0) { return $null }
+            if ($r.EventType -ne 2) { return $null }   # a key is in front: ReadKey's turn
+            [CLIntMouse.Win]::ReadConsoleInput($h, [ref]$r, 1, [ref]$got) | Out-Null
+            if ($r.Flags -band 4) {   # wheel: plain arrows, so it works in modals too
+                if ($r.Btn -band 0x80000000) { return 'DownArrow' } else { return 'UpArrow' }
+            }
+            if ($script:inModal) { continue }
+            $leftNow = [bool]($r.Btn -band 1)
+            if ($r.Flags -band 1) {   # movement: hover-select the row under the cursor
+                Select-RowAt $r.Y | Out-Null
+                $script:mouseLeftWas = $leftNow
+                continue
+            }
+            # plain button event (flags 0, or 2 for the double-click repeat)
+            $press = $leftNow -and -not $script:mouseLeftWas
+            $script:mouseLeftWas = $leftNow
+            if (-not $press) { continue }
+            if ($r.Y -eq 0) {   # tab bar
+                foreach ($hit in $script:tabHit) {
+                    if ($r.X -ge $hit[0] -and $r.X -le $hit[1]) {
+                        if ($hit[2] -ne $script:tab) { Switch-Tab ($hit[2] - $script:tab) }
+                        break
+                    }
+                }
+                continue
+            }
+            if ((Select-RowAt $r.Y) -ge 0) { return 'Enter' }
+        }
+    } catch { return $null }
+}
+
 function Read-InputKey {
     while ($true) {
+        $mk = Read-MouseEvent
+        if ($mk) { return $mk }
         if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
@@ -1726,6 +1845,7 @@ try {
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate('CLInt') | Out-Null } catch {}
     Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
+    Set-MouseMode $mouseEnabled
     # Opt-in quiet update check: a hidden helper compares versions and
     # leaves update-available.txt for the UI to notice. Never blocks.
     if ($script:autoCheck) {
@@ -1885,6 +2005,12 @@ try {
                             $settings['AutoUpdateCheck'] = $script:autoCheck
                             Save-Settings
                         }
+                        'Mouse' {
+                            $script:mouseEnabled = -not $script:mouseEnabled
+                            $settings['Mouse'] = $script:mouseEnabled
+                            Save-Settings
+                            Set-MouseMode $script:mouseEnabled
+                        }
                         'VideoHist' {
                             $script:videoHistEnabled = -not $script:videoHistEnabled
                             $settings['VideoHistory'] = $script:videoHistEnabled
@@ -1934,6 +2060,10 @@ try {
                             }
                             Write-Host ""
                             Write-Host "   press any button to go back" -ForegroundColor $theme.Hint
+                            # the menu geometry is gone from this screen, so
+                            # stray clicks/hovers must not hit-test against it
+                            # (Draw-All below resets the flag)
+                            $script:inModal = $true
                             Read-InputKey | Out-Null
                         }
                     }
