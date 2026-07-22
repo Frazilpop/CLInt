@@ -34,6 +34,13 @@ Tabs are set up on CLInt's first launch, with the same gamepad-driven
 pickers the SETTINGS tab uses — nothing to type, and everything can be
 changed later in SETTINGS.
 
+## How to Uninstall
+
+Run `Uninstall.bat`. It stops CLInt and the hotkey, removes the desktop
+shortcut, startup entry and staged icon, and asks whether to keep your
+settings and history (kept by default, so a reinstall picks them straight
+back up). Delete the folder afterwards if you want CLInt gone completely.
+
 ## TDP – Motion Assistant support (for WIN GPD Devices)
 
   Built-in support for machines with GDP Motion Assistant. RB
