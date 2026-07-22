@@ -263,9 +263,9 @@ function Set-Tdp([double]$stapmW, [double]$fastW, [double]$slowW) {
 # Motion Assistant re-applies its *default* profile's TDP the moment it
 # detects a new game process (the limits snap back within ~2s of the exe
 # appearing), so a set-then-launch value never survives. It applies once
-# per detection rather than continuously, so while a game with a CLInt
-# wattage runs, Wait-ForGameExit calls this to nudge the limits back
-# whenever something else has moved them.
+# per detection rather than continuously, so Wait-ForGameExit calls this
+# for the first short stretch after the game appears to nudge the limits
+# back, then leaves the hardware alone for the rest of the session.
 function Assert-Tdp([int]$watts) {
     try {
         $cur = Get-CurrentTdp
@@ -1518,8 +1518,9 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0) {
             if (Get-Process -Name $proc -ErrorAction SilentlyContinue) { break }
             Start-Sleep -Milliseconds 500
         }
+        $holdUntil = [DateTime]::Now.AddSeconds(45)
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
-            if ($holdTdpW) { Assert-Tdp $holdTdpW }
+            if ($holdTdpW -and [DateTime]::Now -lt $holdUntil) { Assert-Tdp $holdTdpW }
             Start-Sleep -Seconds 2
         }
         return
@@ -1531,8 +1532,9 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0) {
         if ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) { break }
         Start-Sleep -Milliseconds 500
     }
+    $holdUntil = [DateTime]::Now.AddSeconds(45)
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
-        if ($holdTdpW) { Assert-Tdp $holdTdpW }
+        if ($holdTdpW -and [DateTime]::Now -lt $holdUntil) { Assert-Tdp $holdTdpW }
         Start-Sleep -Seconds 2
     }
 }
@@ -1843,7 +1845,7 @@ try {
                 if ($tdpEnabled -and $tdpWatts) {
                     $prevTdp = Get-CurrentTdp
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
-                    Write-Host "   TDP: $($tdpWatts)W (held while it runs)" -ForegroundColor $theme.Notice
+                    Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
