@@ -1391,7 +1391,20 @@ function Read-MouseEvent {
             if ($r.EventType -ne 2) { return $null }   # a key is in front: ReadKey's turn
             [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$r, 1, [ref]$got) | Out-Null
             if ($r.Flags -band 4) {   # wheel: plain arrows, so it works in modals too
-                if ($r.Btn -band 0x80000000) { return 'DownArrow' } else { return 'UpArrow' }
+                $down = [bool]($r.Btn -band 0x80000000)
+                # collapse a queued burst of same-direction notches - a fast
+                # flick queues faster than a big-library redraw drains
+                while ($true) {
+                    $n2 = [uint32]0
+                    if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($hin, [ref]$n2) -or $n2 -eq 0) { break }
+                    $p = New-Object CLIntMouse.Rec
+                    $g2 = [uint32]0
+                    if (-not [CLIntMouse.Win]::PeekConsoleInput($hin, [ref]$p, 1, [ref]$g2) -or $g2 -eq 0) { break }
+                    if ($p.EventType -ne 2 -or -not ($p.Flags -band 4) -or
+                        ([bool]($p.Btn -band 0x80000000)) -ne $down) { break }
+                    [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$p, 1, [ref]$g2) | Out-Null
+                }
+                if ($down) { return 'DownArrow' } else { return 'UpArrow' }
             }
             $leftNow = [bool]($r.Btn -band 1)
             $isMove  = [bool]($r.Flags -band 1)
@@ -1436,11 +1449,40 @@ function Read-MouseEvent {
     }
 }
 
+# Keyboard auto-repeat queues arrows faster than a big-library scroll
+# redraw drains them; the backlog then replays absurdly fast and outlives
+# the key release. After reading an arrow, consume any auto-repeat
+# keydowns of the SAME arrow still queued (peeked, so nothing else is
+# eaten). A key-up stops the drain, so deliberate rapid taps all count.
+function Drain-RepeatArrows([string]$arrow) {
+    if (-not $script:mouseOk) { return }   # same P/Invoke class as the mouse
+    $vk = if ($arrow -eq 'UpArrow') { 0x26 } else { 0x28 }
+    try {
+        $hin = [CLIntMouse.Win]::GetStdHandle(-10)
+        while ($true) {
+            $n = [uint32]0
+            if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($hin, [ref]$n) -or $n -eq 0) { return }
+            $r = New-Object CLIntMouse.Rec
+            $got = [uint32]0
+            if (-not [CLIntMouse.Win]::PeekConsoleInput($hin, [ref]$r, 1, [ref]$got) -or $got -eq 0) { return }
+            # KEY_EVENT overlaps the mouse fields: X = bKeyDown (low half),
+            # Btn high word = wVirtualKeyCode
+            if ($r.EventType -ne 1 -or $r.X -eq 0 -or
+                ((($r.Btn -shr 16) -band 0xFFFF) -ne $vk)) { return }
+            [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$r, 1, [ref]$got) | Out-Null
+        }
+    } catch {}
+}
+
 function Read-InputKey {
     while ($true) {
         $mk = Read-MouseEvent
         if ($mk) { return $mk }
-        if ([Console]::KeyAvailable) { return ([Console]::ReadKey($true)).Key }
+        if ([Console]::KeyAvailable) {
+            $k = ([Console]::ReadKey($true)).Key
+            if ("$k" -in 'UpArrow', 'DownArrow') { Drain-RepeatArrows "$k" }
+            return $k
+        }
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
         # The window can resize while we sit here waiting (the fullscreen
