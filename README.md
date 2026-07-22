@@ -31,9 +31,11 @@ Download this folder as a ZIP. Extract anywhere and run
 ## TDP – Motion Assistant support (for WIN GPD Devices)
 
   Built-in support for machines with GDP Motion Assistant. RB
-  cycles between default and per-game wattage profile, applied at launch with
+  cycles between default and per-game wattage profile, applied with
   Motion Assistant's bundled `ryzenadj` (works unelevated because its
-  driver is already loaded) and restored when the game exits. Stored in
+  driver is already loaded), held for as long as the game runs (Motion
+  Assistant's own auto-TDP would otherwise override it moments after the
+  game starts) and restored when the game exits. Stored in
   `tdp-settings.json`. 
   
   This feature is auto-detected and hidden if Motion Assistant is not installed.

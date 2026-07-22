@@ -260,6 +260,21 @@ function Set-Tdp([double]$stapmW, [double]$fastW, [double]$slowW) {
                 "--slow-limit=$([int]($slowW * 1000))" 2>$null | Out-Null
 }
 
+# Motion Assistant re-applies its *default* profile's TDP the moment it
+# detects a new game process (the limits snap back within ~2s of the exe
+# appearing), so a set-then-launch value never survives. It applies once
+# per detection rather than continuously, so while a game with a CLInt
+# wattage runs, Wait-ForGameExit calls this to nudge the limits back
+# whenever something else has moved them.
+function Assert-Tdp([int]$watts) {
+    try {
+        $cur = Get-CurrentTdp
+        if ($cur -and [Math]::Abs($cur.Stapm - $watts) -gt 0.5) {
+            Set-Tdp $watts ($watts + 1) $watts
+        }
+    } catch {}
+}
+
 # Motion Assistant applies its own TDP to processes it has a profile for
 # (Profiles\Process\<exename>.ini) and would fight anything the menu sets.
 # Flag those games by matching their exe names against the profile list,
@@ -1493,7 +1508,7 @@ function Add-TabConfig {
     }
 }
 
-function Wait-ForGameExit($game) {
+function Wait-ForGameExit($game, [int]$holdTdpW = 0) {
     if ($game.Exe) {
         # Non-Steam shortcut: Steam doesn't track these in the registry,
         # so watch the exe's process instead.
@@ -1504,6 +1519,7 @@ function Wait-ForGameExit($game) {
             Start-Sleep -Milliseconds 500
         }
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
+            if ($holdTdpW) { Assert-Tdp $holdTdpW }
             Start-Sleep -Seconds 2
         }
         return
@@ -1516,6 +1532,7 @@ function Wait-ForGameExit($game) {
         Start-Sleep -Milliseconds 500
     }
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
+        if ($holdTdpW) { Assert-Tdp $holdTdpW }
         Start-Sleep -Seconds 2
     }
 }
@@ -1826,12 +1843,12 @@ try {
                 if ($tdpEnabled -and $tdpWatts) {
                     $prevTdp = Get-CurrentTdp
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
-                    Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
+                    Write-Host "   TDP: $($tdpWatts)W (held while it runs)" -ForegroundColor $theme.Notice
                 }
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-Process "steam://rungameid/$($g.LaunchId)" }
-                Wait-ForGameExit $g
+                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 })
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
                     Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
