@@ -562,6 +562,12 @@ namespace CLIntMouse {
 } catch {}
 $script:mouseLeftWas = $false   # last seen left-button state, for press-edge detection
 $script:tabHit = @()            # tab-bar extents recorded by Draw-All: (x0, x1, index)
+# Modal mouse map: a modal publishes where its list rows sit (top row,
+# scroll offset, visible row count, entry count) and handles the
+# 'MouseHover'/'MouseClick' pseudo-keys Read-MouseEvent returns, with the
+# hit index in modalHover. modalTop -1 = no mouse map (keyboard-only modal).
+$script:modalTop = -1; $script:modalOff = 0; $script:modalRows = 0
+$script:modalCount = 0; $script:modalHover = -1
 
 function Set-MouseMode([bool]$on) {
     if (-not $script:mouseOk) { return }
@@ -1387,16 +1393,28 @@ function Read-MouseEvent {
             if ($r.Flags -band 4) {   # wheel: plain arrows, so it works in modals too
                 if ($r.Btn -band 0x80000000) { return 'DownArrow' } else { return 'UpArrow' }
             }
-            if ($script:inModal) { continue }
             $leftNow = [bool]($r.Btn -band 1)
-            if ($r.Flags -band 1) {   # movement: hover-select the row under the cursor
-                Select-RowAt $r.Y | Out-Null
-                $script:mouseLeftWas = $leftNow
+            $isMove  = [bool]($r.Flags -band 1)
+            # a press is a fresh left-down on a plain button event (flags 0,
+            # or 2 for the double-click repeat - already down, so no edge)
+            $press   = -not $isMove -and $leftNow -and -not $script:mouseLeftWas
+            $script:mouseLeftWas = $leftNow
+            if ($script:inModal) {
+                # inside a modal the published mouse map decides what a row
+                # means; the modal's own input loop acts on the pseudo-keys
+                $mi = $script:modalOff + ($r.Y - $script:modalTop)
+                if ($script:modalTop -lt 0 -or $r.Y -lt $script:modalTop -or
+                    $r.Y -ge $script:modalTop + $script:modalRows -or
+                    $mi -ge $script:modalCount) { continue }
+                if ($isMove) {
+                    if ($mi -ne $script:modalHover) { $script:modalHover = $mi; return 'MouseHover' }
+                } elseif ($press) { $script:modalHover = $mi; return 'MouseClick' }
                 continue
             }
-            # plain button event (flags 0, or 2 for the double-click repeat)
-            $press = $leftNow -and -not $script:mouseLeftWas
-            $script:mouseLeftWas = $leftNow
+            if ($isMove) {   # movement: hover-select the row under the cursor
+                Select-RowAt $r.Y | Out-Null
+                continue
+            }
             if (-not $press) { continue }
             if ($r.Y -eq 0) {   # tab bar
                 foreach ($hit in $script:tabHit) {
@@ -1531,11 +1549,17 @@ function Pick-Folder([string]$label, [string]$start) {
                 Write-At 1 ($top + $r) (' ' * $rowW) $theme.Text
             }
         }
+        # republish the mouse map every frame: the list scrolls ($off) and
+        # changes length as folders are entered
+        $script:modalTop = $top; $script:modalOff = $off
+        $script:modalRows = $rows; $script:modalCount = $entries.Count
         $key = Read-InputKey
         switch ($key) {
-            'UpArrow'   { if ($entries.Count) { $sel = ($sel - 1 + $entries.Count) % $entries.Count } }
-            'DownArrow' { if ($entries.Count) { $sel = ($sel + 1) % $entries.Count } }
-            'Enter'     {
+            'UpArrow'    { if ($entries.Count) { $sel = ($sel - 1 + $entries.Count) % $entries.Count } }
+            'DownArrow'  { if ($entries.Count) { $sel = ($sel + 1) % $entries.Count } }
+            'MouseHover' { $sel = $script:modalHover }
+            { "$_" -in 'Enter', 'MouseClick' } {
+                if ("$_" -eq 'MouseClick') { $sel = $script:modalHover }
                 if ($entries.Count -gt 0) {
                     $e = $entries[$sel]
                     if ($e.Type -eq 'Pick') { return $e.Path }
@@ -1562,6 +1586,9 @@ function Pick-Folder([string]$label, [string]$start) {
 function Pick-Option([string]$title, [string[]]$options) {
     $script:inModal = $true
     $sel = 0
+    $script:modalTop = 4; $script:modalOff = 0
+    $script:modalRows = $options.Count; $script:modalCount = $options.Count
+    $script:modalHover = 0
     Clear-Host
     Get-Layout
     while ($true) {
@@ -1572,9 +1599,13 @@ function Pick-Option([string]$title, [string[]]$options) {
             else             { Write-At 1 (4 + $i) (Pad ('     ' + $options[$i] + '  ') ($W - 3)) $theme.Text }
         }
         switch (Read-InputKey) {
-            'UpArrow'   { $sel = ($sel - 1 + $options.Count) % $options.Count }
-            'DownArrow' { $sel = ($sel + 1) % $options.Count }
-            'Enter'     { return $sel }
+            'UpArrow'    { $sel = ($sel - 1 + $options.Count) % $options.Count }
+            'DownArrow'  { $sel = ($sel + 1) % $options.Count }
+            'MouseHover' { $sel = $script:modalHover }
+            { "$_" -in 'Enter', 'MouseClick' } {
+                if ("$_" -eq 'MouseClick') { $sel = $script:modalHover }
+                return $sel
+            }
             'Escape'    { return -1 }
             'Q'         { return -1 }
         }
@@ -1588,6 +1619,9 @@ function Pick-Mascot([string]$title, [string]$current) {
     $names = @($mascots.Keys | Where-Object { $_ -ne 'robot' })   # robot belongs to SETTINGS
     $entries = @('(automatic)') + $names
     $sel = [Math]::Max(0, [array]::IndexOf($entries, $current))
+    $script:modalTop = 4; $script:modalOff = 0
+    $script:modalRows = $entries.Count; $script:modalCount = $entries.Count
+    $script:modalHover = $sel
     Clear-Host
     Get-Layout
     while ($true) {
@@ -1604,9 +1638,13 @@ function Pick-Mascot([string]$title, [string]$current) {
             Write-At 36 (4 + $r) (Pad $line 24) $theme.Logo
         }
         switch (Read-InputKey) {
-            'UpArrow'   { $sel = ($sel - 1 + $entries.Count) % $entries.Count }
-            'DownArrow' { $sel = ($sel + 1) % $entries.Count }
-            'Enter'     { if ($sel -eq 0) { return '::auto' } else { return $entries[$sel] } }
+            'UpArrow'    { $sel = ($sel - 1 + $entries.Count) % $entries.Count }
+            'DownArrow'  { $sel = ($sel + 1) % $entries.Count }
+            'MouseHover' { $sel = $script:modalHover }
+            { "$_" -in 'Enter', 'MouseClick' } {
+                if ("$_" -eq 'MouseClick') { $sel = $script:modalHover }
+                if ($sel -eq 0) { return '::auto' } else { return $entries[$sel] }
+            }
             'Escape'    { return $null }
             'Q'         { return $null }
         }
@@ -1618,6 +1656,7 @@ function Pick-Mascot([string]$title, [string]$current) {
 # override" - callers treat it as "back to the automatic value".
 function Read-TextInput([string]$title, [string]$current) {
     $script:inModal = $true
+    $script:modalTop = -1   # keyboard-only modal: no mouse map
     Clear-Host
     Get-Layout
     Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
