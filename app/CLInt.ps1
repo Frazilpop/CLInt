@@ -537,15 +537,39 @@ function Set-ConsoleWindowed {
 $script:conHwnd = [IntPtr]::Zero
 try {
     Add-Type -Namespace CLIntFocus -Name Win -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
 } catch {}
+
+# Is the console genuinely off-screen? Losing the foreground is NOT
+# enough: Steam's small "preparing to launch" dialog takes the foreground
+# while the fullscreen console is still visible behind it (painting then
+# flashed WELCOME BACK over the LAUNCHING screen mid-launch, v0.2.14 bug).
+# Off-screen = minimised, or the foreground window's rect fully covers
+# ours. Comparing two rects from the same DPI-virtualised space is a pure
+# read - no pixel placement math; 8px slack absorbs borderless quirks.
+function Test-MenuCovered {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return $false }
+    try {
+        if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) { return $true }
+        $fg = [CLIntFocus.Win]::GetForegroundWindow()
+        if ($fg -eq $script:conHwnd -or $fg -eq [IntPtr]::Zero) { return $false }
+        $rf = New-Object CLIntFocus.Win+RECT
+        $rc = New-Object CLIntFocus.Win+RECT
+        if (-not [CLIntFocus.Win]::GetWindowRect($fg, [ref]$rf))              { return $false }
+        if (-not [CLIntFocus.Win]::GetWindowRect($script:conHwnd, [ref]$rc)) { return $false }
+        return ($rf.Left -le $rc.Left + 8 -and $rf.Top    -le $rc.Top    + 8 -and
+                $rf.Right + 8 -ge $rc.Right -and $rf.Bottom + 8 -ge $rc.Bottom)
+    } catch { return $false }
+}
 
 # A just-launched game can be denied activation by Windows' focus-steal
 # protection and sit invisible BEHIND the fullscreen menu (seen when Steam
@@ -2010,23 +2034,22 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                     if (-not $gameHadFocus) { Hide-MenuForGame }
                 }
             }
-            # While the game holds the screen the console is invisible: paint
+            # While the game covers the screen the console is invisible: paint
             # the landing screen onto it NOW (re-painting as the minutes tick
             # so the duration stays current), so the moment the game window
             # closes what Windows exposes is already the landing screen, not
             # the stale launch screen - exit-detection latency stops mattering.
-            if ($landing) {
-                try {
-                    $fg = [CLIntFocus.Win]::GetForegroundWindow()
-                    if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) {
-                        $lm = [int]($now - $waitT0).TotalMinutes
-                        if ($lm -ne $lastLandMin) {
-                            & $landing
-                            $lastLandMin = $lm
-                            $script:landingPainted = $true
-                        }
-                    }
-                } catch {}
+            # Test-MenuCovered, not just foreground-lost: mid-launch a small
+            # dialog can hold the foreground with the console still showing.
+            if ($landing -and (Test-MenuCovered)) {
+                $lm = [int]($now - $waitT0).TotalMinutes
+                if ($lm -ne $lastLandMin) {
+                    try {
+                        & $landing
+                        $lastLandMin = $lm
+                        $script:landingPainted = $true
+                    } catch {}
+                }
             }
             Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
         }
@@ -2065,21 +2088,18 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                 if (-not $gameHadFocus) { Hide-MenuForGame }
             }
         }
-        # Pre-paint the landing screen onto the hidden console while the game
+        # Pre-paint the landing screen onto the covered console while the game
         # holds the screen (same reasoning as the exe path above): whatever is
         # painted here is what the closing game window exposes.
-        if ($landing) {
-            try {
-                $fg = [CLIntFocus.Win]::GetForegroundWindow()
-                if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) {
-                    $lm = [int]($now - $waitT0).TotalMinutes
-                    if ($lm -ne $lastLandMin) {
-                        & $landing
-                        $lastLandMin = $lm
-                        $script:landingPainted = $true
-                    }
-                }
-            } catch {}
+        if ($landing -and (Test-MenuCovered)) {
+            $lm = [int]($now - $waitT0).TotalMinutes
+            if ($lm -ne $lastLandMin) {
+                try {
+                    & $landing
+                    $lastLandMin = $lm
+                    $script:landingPainted = $true
+                } catch {}
+            }
         }
         # Steam's Running flag lags the window closing, which parked the
         # user on the stale launch screen for seconds. The window we saw
