@@ -819,16 +819,33 @@ $typeMascot   = @{ Steam = 'rocket'; Shortcuts = 'handheld'; Files = 'vhs'; Sett
 $extraMascots = @('alien', 'ufo', 'cat', 'ghost', 'slime', 'planet')
 
 # Color themes: every drawing call reads $theme, so switching is instant.
-# Selected in SETTINGS, stored as "Theme" in settings.json.
+# Selected in SETTINGS, stored as "Theme" in settings.json. Bg is the
+# console's own background - nothing else in the app passes one, so it is
+# what Clear-Host fills with and what every unpainted cell shows.
 $themes = [ordered]@{
-    classic = @{ Accent = 'Cyan';    Logo = 'Magenta';    Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkMagenta'; SelFg = 'Black' }
-    vapor   = @{ Accent = 'Magenta'; Logo = 'Cyan';       Info = 'DarkMagenta'; Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkCyan';    SelFg = 'Black' }
-    matrix  = @{ Accent = 'Green';   Logo = 'DarkGreen';  Info = 'DarkGreen';   Hint = 'DarkGray'; Text = 'Gray'; Bright = 'Green';  Notice = 'Yellow'; Scroll = 'DarkGreen';   SelFg = 'Black' }
-    amber   = @{ Accent = 'Yellow';  Logo = 'DarkYellow'; Info = 'DarkYellow';  Hint = 'DarkGray'; Text = 'Gray'; Bright = 'Yellow'; Notice = 'Red';    Scroll = 'DarkYellow';  SelFg = 'Black' }
-    arctic  = @{ Accent = 'White';   Logo = 'Cyan';       Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray'; Bright = 'White';  Notice = 'Yellow'; Scroll = 'DarkCyan';    SelFg = 'Black' }
+    classic    = @{ Bg = 'Black';    Accent = 'Cyan';     Logo = 'Magenta';     Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkMagenta'; SelFg = 'Black' }
+    vapor      = @{ Bg = 'Black';    Accent = 'Magenta';  Logo = 'Cyan';        Info = 'DarkMagenta'; Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'Black' }
+    matrix     = @{ Bg = 'Black';    Accent = 'Green';    Logo = 'DarkGreen';   Info = 'DarkGreen';   Hint = 'DarkGray'; Text = 'Gray';  Bright = 'Green';    Notice = 'Yellow';  Scroll = 'DarkGreen';   SelFg = 'Black' }
+    amber      = @{ Bg = 'Black';    Accent = 'Yellow';   Logo = 'DarkYellow';  Info = 'DarkYellow';  Hint = 'DarkGray'; Text = 'Gray';  Bright = 'Yellow';   Notice = 'Red';     Scroll = 'DarkYellow';  SelFg = 'Black' }
+    arctic     = @{ Bg = 'Black';    Accent = 'White';    Logo = 'Cyan';        Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'Black' }
+    powershell = @{ Bg = 'DarkBlue'; Accent = 'Yellow';   Logo = 'White';       Info = 'Cyan';        Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'DarkBlue' }
+    paper      = @{ Bg = 'White';    Accent = 'DarkBlue'; Logo = 'DarkMagenta'; Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Black'; Bright = 'DarkBlue'; Notice = 'DarkRed'; Scroll = 'DarkMagenta'; SelFg = 'White' }
 }
 $themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
 $theme = $themes[$themeName]
+# The console's colours as we found them, so quitting hands the window
+# back unchanged - a theme with a background repaints the whole buffer.
+# Black is enum 0, so these are compared against $null, never truthiness.
+$origFg = $null; $origBg = $null
+try { $origFg = $Host.UI.RawUI.ForegroundColor; $origBg = $Host.UI.RawUI.BackgroundColor } catch {}
+# Apply the current theme's console colours. Only takes effect on cells
+# painted after it, so every caller follows it with a full redraw.
+function Set-ThemeColors {
+    try {
+        $Host.UI.RawUI.BackgroundColor = $script:theme.Bg
+        $Host.UI.RawUI.ForegroundColor = $script:theme.Text
+    } catch {}
+}
 
 # Text size (SETTINGS): font heights in scaled pixels, so the visual size
 # follows the user's display scale like every other app. Medium is the
@@ -2511,6 +2528,7 @@ try {
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
     Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
+    Set-ThemeColors         # before the first Draw-All: its Clear-Host lays down the background
     Set-MouseMode $mouseEnabled
     # Opt-in quiet update check: a hidden helper compares versions and
     # leaves update-available.txt for the UI to notice. Never blocks.
@@ -2709,6 +2727,9 @@ try {
                                 $script:theme     = $themes[$script:themeName]
                                 $settings['Theme'] = $script:themeName
                                 Save-Settings
+                                # the Draw-All this branch ends with clears the
+                                # screen, which is what lays the new background
+                                Set-ThemeColors
                             }
                         }
                         'Update' {
@@ -2914,4 +2935,10 @@ try {
     }
 } finally {
     [Console]::CursorVisible = $true
+    # hand the console back the colours it had (a dev shell keeps its own
+    # look; the app's own window is closing anyway)
+    try {
+        if ($null -ne $script:origBg) { $Host.UI.RawUI.BackgroundColor = $script:origBg }
+        if ($null -ne $script:origFg) { $Host.UI.RawUI.ForegroundColor = $script:origFg }
+    } catch {}
 }
