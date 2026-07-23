@@ -708,6 +708,14 @@ namespace CLIntMouse {
 $script:mouseLeftWas = $false   # last seen left-button state, for press-edge detection
 $script:wheelY = -1             # pointer row at the last wheel notch
 $script:wheelSteps = 1          # notches collapsed into that one event
+# Pointer cell last seen, and whether hover is currently muted. conhost
+# reports a MOUSE_MOVED record for pointer movement far finer than one
+# cell, so a pointer merely resting on the list keeps re-announcing the
+# row it is already on - which yanked the cursor back every time the pad
+# or the arrow keys moved it. Any non-mouse input mutes hover; it comes
+# back the moment the pointer genuinely changes cell.
+$script:mouseCellX = -1; $script:mouseCellY = -1
+$script:hoverMuted = $false
 $script:tabHit = @()            # tab-bar extents recorded by Draw-All: (x0, x1, index)
 # Modal mouse map: a modal publishes where its list rows sit (top row,
 # scroll offset, visible row count, entry count) and handles the
@@ -1634,6 +1642,7 @@ function Read-MouseEvent {
                 # dead. The row the pointer ends up over is recorded here
                 # because a wheel record carries the pointer position too.
                 $script:wheelY = $r.Y
+                $script:hoverMuted = $false   # the mouse is being used again
                 if ($down) { return 'ScrollDown' } else { return 'ScrollUp' }
             }
             $leftNow = [bool]($r.Btn -band 1)
@@ -1642,6 +1651,27 @@ function Read-MouseEvent {
             # or 2 for the double-click repeat - already down, so no edge)
             $press   = -not $isMove -and $leftNow -and -not $script:mouseLeftWas
             $script:mouseLeftWas = $leftNow
+            if ($press) { $script:hoverMuted = $false }   # a click is the mouse taking over
+            if ($isMove) {
+                # Same cell as last time = the pointer hasn't really gone
+                # anywhere: sub-cell wobble, or conhost re-reporting a
+                # stationary pointer. Nothing to hover.
+                if ($r.X -eq $script:mouseCellX -and $r.Y -eq $script:mouseCellY) { continue }
+                $script:mouseCellX = $r.X; $script:mouseCellY = $r.Y
+                # First real cell change after pad/keyboard navigation only
+                # un-mutes: it takes a deliberate move (any second cell) to
+                # hand the selection back, so one stray cell of drift can't
+                # steal the cursor from under the controller.
+                if ($script:hoverMuted) {
+                    $script:hoverMuted = $false
+                    # A modal's cursor has moved by pad since the last hover,
+                    # so the remembered hover index is stale: clear it, or a
+                    # move back onto that same row would look like no change
+                    # and fire nothing.
+                    $script:modalHover = -1
+                    continue
+                }
+            }
             if ($script:inModal) {
                 # inside a modal the published mouse map decides what a row
                 # means; the modal's own input loop acts on the pseudo-keys
@@ -1708,13 +1738,17 @@ function Read-InputKey {
     while ($true) {
         $mk = Read-MouseEvent
         if ($mk) { return $mk }
+        # Keyboard and pad both mute hover: while the user is driving the
+        # selection themselves, a pointer parked over the list must not keep
+        # pulling the cursor back to whatever row it happens to sit on.
         if ([Console]::KeyAvailable) {
             $k = ([Console]::ReadKey($true)).Key
             if ("$k" -in 'UpArrow', 'DownArrow') { Drain-RepeatArrows "$k" }
+            $script:hoverMuted = $true
             return $k
         }
         $k = Get-PadKey
-        if ($null -ne $k) { return $k }
+        if ($null -ne $k) { $script:hoverMuted = $true; return $k }
         # The window can resize while we sit here waiting (the fullscreen
         # transition settles a beat after launch, a game changes resolution
         # and hands the desktop back smaller, frames get dragged), and a
