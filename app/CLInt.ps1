@@ -358,15 +358,34 @@ if ($needSteam) {
 
 # Shortcut-folder tabs: .lnk files collected in one folder, launched via
 # the shortcut itself; exit is tracked by the target exe.
+#
+# ...but only when the target IS an exe. A .lnk in that folder can point at
+# anything Explorer can open - a folder, a document, a .bat - and those get
+# no process of their own to watch: a folder opens in the always-running
+# explorer.exe, a PDF inside whatever reader is already up. Watching for a
+# process named after the target then never succeeded, so the menu sat on
+# LAUNCHING for the whole 90s start timeout, ignoring input, before finally
+# giving up (v1.1.3 bug). Those are marked Track = 'Window' here and followed
+# by the window they open instead - see Wait-ForOpenedWindow.
+function Test-TrackableExe([string]$path) {
+    if (-not $path) { return $false }
+    try {
+        if (Test-Path -LiteralPath $path -PathType Container) { return $false }
+        return ([System.IO.Path]::GetExtension($path) -in '.exe', '.com')
+    } catch { return $false }
+}
+
 function Get-ShortcutGames([string]$dir) {
     $wsh = New-Object -ComObject WScript.Shell
     @(Get-ChildItem (Join-Path $dir '*.lnk') -ErrorAction SilentlyContinue |
         Sort-Object BaseName | ForEach-Object {
+            $target = $wsh.CreateShortcut($_.FullName).TargetPath
             [pscustomobject]@{
                 Name  = $_.BaseName
                 AppId = "local:$($_.BaseName)"   # key for the per-game TDP store
                 Path  = $_.FullName
-                Exe   = $wsh.CreateShortcut($_.FullName).TargetPath
+                Exe   = $target
+                Track = $(if (Test-TrackableExe $target) { 'Exe' } else { 'Window' })
                 Dir   = $null
             }
         })
@@ -1857,11 +1876,24 @@ function Pick-Folder([string]$label, [string]$start) {
     $sel = 0; $off = 0
     $entries = @()
     $needList = $true
+    # Set whenever this listing was reached by going UP a level: the cursor
+    # lands back on '..' instead of on '[ use this folder ]', so holding A
+    # (or Enter) climbs out of a deep tree one level per press. Landing on
+    # the pick row meant the second press chose the folder you had just
+    # left, which is never what a double-tap out of nested folders means.
+    $landOnUp = $false
     Clear-Host
     Get-Layout
     while ($true) {
         if ($needList) {
             $entries = @(Get-PickerEntries $dir)
+            if ($landOnUp) {
+                $i = 0
+                while ($i -lt $entries.Count -and $entries[$i].Type -ne 'Up') { $i++ }
+                # The drive list has no '..' row - fall back to the top there.
+                $sel = $(if ($i -lt $entries.Count) { $i } else { 0 })
+                $landOnUp = $false
+            }
             if ($sel -ge $entries.Count) { $sel = [Math]::Max(0, $entries.Count - 1) }
             $needList = $false
         }
@@ -1904,7 +1936,7 @@ function Pick-Folder([string]$label, [string]$start) {
                     else {   # '..'
                         $parent = Split-Path $dir -Parent
                         $dir = if ([string]::IsNullOrEmpty($parent)) { $null } else { $parent }
-                        $sel = 0; $off = 0; $needList = $true
+                        $sel = 0; $off = 0; $needList = $true; $landOnUp = $true
                     }
                 }
             }
@@ -1912,7 +1944,7 @@ function Pick-Folder([string]$label, [string]$start) {
                 if ($null -eq $dir) { return $null }   # B in the drive list cancels
                 $parent = Split-Path $dir -Parent
                 $dir = if ([string]::IsNullOrEmpty($parent)) { $null } else { $parent }
-                $sel = 0; $off = 0; $needList = $true
+                $sel = 0; $off = 0; $needList = $true; $landOnUp = $true
             }
             'Q'         { return $null }
         }
@@ -2344,6 +2376,38 @@ function Invoke-FirstRunSetup {
     $script:selected = 0
     $script:offset   = 0
     Snap-Selection
+}
+
+# The wait for a shortcut that opened something rather than launching a game
+# (Track = 'Window'): there is no process to poll, so follow the WINDOW it put
+# on screen. Whatever takes the foreground off us within a few seconds is it -
+# an Explorer window for a folder, the reader for a document.
+#
+# CLInt is left where it is rather than minimised: it is fullscreen, so closing
+# that window exposes the menu again directly, with no flash of desktop in
+# between. Two things end the wait - the window closing, or CLInt being the
+# foreground again (the menu hotkey, alt-tab). That second one matters: the
+# folder may well stay open, and the user still has to be able to get back into
+# the menu. Nothing appearing at all just returns, so a shortcut that opens
+# silently doesn't strand the menu either.
+function Wait-ForOpenedWindow([int]$appearTimeoutS = 10) {
+    $hwnd = [IntPtr]::Zero
+    $deadline = [DateTime]::Now.AddSeconds($appearTimeoutS)
+    while ([DateTime]::Now -lt $deadline) {
+        try {
+            $fg = [CLIntFocus.Win]::GetForegroundWindow()
+            if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) { $hwnd = $fg; break }
+        } catch { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    while ($true) {
+        try {
+            if (-not [CLIntFocus.Win]::IsWindow($hwnd)) { break }
+            if ([CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
+        } catch { break }
+        Start-Sleep -Milliseconds 300
+    }
 }
 
 function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [scriptblock]$landing = $null) {
@@ -2830,14 +2894,18 @@ try {
                 }
                 $g = $items[$selected]
                 if ($g.Unselectable) { break }   # section row: nothing to launch
+                # A shortcut to a folder or a document is opened, not played:
+                # it says so, and it comes back to the menu rather than to a
+                # WELCOME BACK screen with a time played on it.
+                $opening = ($g.Track -eq 'Window')
                 Clear-Host
                 Write-Host ""
                 Write-Host "      _" -ForegroundColor $theme.Accent
-                Write-Host "     /^\      LAUNCHING" -ForegroundColor $theme.Accent
+                Write-Host "     /^\      $(if ($opening) { 'OPENING' } else { 'LAUNCHING' })" -ForegroundColor $theme.Accent
                 Write-Host "    |___|" -ForegroundColor $theme.Accent
                 Write-Host "    |   |     $($g.Name)" -ForegroundColor $theme.Logo
                 Write-Host "    |___|" -ForegroundColor $theme.Accent
-                Write-Host "   /|   |\    GLHF o7" -ForegroundColor $theme.Info
+                Write-Host "   /|   |\    $(if ($opening) { 'close it to come back' } else { 'GLHF o7' })" -ForegroundColor $theme.Info
                 Write-Host "    ^^^^^" -ForegroundColor $theme.Info
                 Write-Host ""
                 $tdpWatts = Get-GameTdp $g
@@ -2862,12 +2930,18 @@ try {
                 $t0 = [DateTime]::Now
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-SteamGame $g.LaunchId }
-                # GetNewClosure pins $g/$t0 to their values here - the block
-                # runs inside Wait-ForGameExit, and dynamic scoping must not
-                # pick up any same-named local there.
                 $script:landingPainted = $false
-                $landSb = { Draw-LandingScreen $g $t0 }.GetNewClosure()
-                Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 }) $landSb
+                if ($opening) {
+                    # No process to watch: follow the window it opened, and
+                    # return the moment it closes or the user comes back to us.
+                    Wait-ForOpenedWindow
+                } else {
+                    # GetNewClosure pins $g/$t0 to their values here - the block
+                    # runs inside Wait-ForGameExit, and dynamic scoping must not
+                    # pick up any same-named local there.
+                    $landSb = { Draw-LandingScreen $g $t0 }.GetNewClosure()
+                    Wait-ForGameExit $g $(if ($prevTdp) { $tdpWatts } else { 0 }) $(if ($steamCold) { 240 } else { 90 }) $landSb
+                }
                 # The game is gone: get back on screen BEFORE the TDP revert
                 # and re-sorting below so the desktop never shows through.
                 Show-MenuWindow
@@ -2875,8 +2949,13 @@ try {
                 # hidden behind the game, so closing it exposed the screen
                 # directly - repainting now would only flicker. Paint here
                 # only if the game never took the screen (e.g. died at launch).
-                if (-not $script:landingPainted) { Draw-LandingScreen $g $t0 }
-                $landedAt = [DateTime]::Now
+                # An opened folder gets no landing screen at all - straight
+                # back to the live menu, which is what the user wants there.
+                $landedAt = $null
+                if (-not $opening) {
+                    if (-not $script:landingPainted) { Draw-LandingScreen $g $t0 }
+                    $landedAt = [DateTime]::Now
+                }
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
                 if ($script:recentEnabled) {
                     Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
@@ -2892,8 +2971,10 @@ try {
                 $script:batteryNext = 0   # TDP was restored: refresh the corner readout promptly
                 # let the landing screen land - flashing past it reads as a
                 # glitch - then drop keys pressed meanwhile and redraw
-                $left = 1500 - ([DateTime]::Now - $landedAt).TotalMilliseconds
-                if ($left -gt 0) { Start-Sleep -Milliseconds $left }
+                if ($landedAt) {
+                    $left = 1500 - ([DateTime]::Now - $landedAt).TotalMilliseconds
+                    if ($left -gt 0) { Start-Sleep -Milliseconds $left }
+                }
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
             }
