@@ -841,14 +841,43 @@ $extraMascots = @('alien', 'ufo', 'cat', 'ghost', 'slime', 'planet')
 # Selected in SETTINGS, stored as "Theme" in settings.json. Bg is the
 # console's own background - nothing else in the app passes one, so it is
 # what Clear-Host fills with and what every unpainted cell shows.
+#
+# A theme may also carry a Palette: <console colour name> -> 0xRRGGBB, which
+# repaints those entries of THIS console's 16-colour table while the theme is
+# active (see Set-ConsolePalette). The 16 names are all the console can draw,
+# and the two that these themes want as a full-screen background are wrong at
+# that size whatever scheme the window came with: DarkBlue is #000080 on the
+# legacy palette and #0037DA on Campbell (today's conhost default) - navy or
+# electric, both too much across a whole screen - and White is #F2F2F2/#FFFFFF,
+# a torch in a dark room. Softening happens in the palette rather than by
+# picking another name, because there IS no softer name. Bonus: pinning the
+# RGB means these two themes look the same on every machine instead of
+# inheriting whatever scheme that console was configured with.
 $themes = [ordered]@{
     classic    = @{ Bg = 'Black';    Accent = 'Cyan';     Logo = 'Magenta';     Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkMagenta'; SelFg = 'Black' }
     vapor      = @{ Bg = 'Black';    Accent = 'Magenta';  Logo = 'Cyan';        Info = 'DarkMagenta'; Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'Black' }
     matrix     = @{ Bg = 'Black';    Accent = 'Green';    Logo = 'DarkGreen';   Info = 'DarkGreen';   Hint = 'DarkGray'; Text = 'Gray';  Bright = 'Green';    Notice = 'Yellow';  Scroll = 'DarkGreen';   SelFg = 'Black' }
     amber      = @{ Bg = 'Black';    Accent = 'Yellow';   Logo = 'DarkYellow';  Info = 'DarkYellow';  Hint = 'DarkGray'; Text = 'Gray';  Bright = 'Yellow';   Notice = 'Red';     Scroll = 'DarkYellow';  SelFg = 'Black' }
     arctic     = @{ Bg = 'Black';    Accent = 'White';    Logo = 'Cyan';        Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'Black' }
-    powershell = @{ Bg = 'DarkBlue'; Accent = 'Yellow';   Logo = 'White';       Info = 'Cyan';        Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'DarkBlue' }
-    paper      = @{ Bg = 'White';    Accent = 'DarkBlue'; Logo = 'DarkMagenta'; Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Black'; Bright = 'DarkBlue'; Notice = 'DarkRed'; Scroll = 'DarkMagenta'; SelFg = 'White' }
+    powershell = @{ Bg = 'DarkBlue'; Accent = 'Yellow';   Logo = 'White';       Info = 'Cyan';        Hint = 'DarkGray'; Text = 'Gray';  Bright = 'White';    Notice = 'Yellow';  Scroll = 'DarkCyan';    SelFg = 'DarkBlue'
+                    # A muted slate navy in place of the electric stock blue -
+                    # still unmistakably the PowerShell blue, minus the glare.
+                    # DarkBlue is also this theme's SelFg, so the text on the
+                    # yellow selection bar softens with it. Cyan/DarkCyan come
+                    # down to match (stock cyan on navy vibrates), the yellow
+                    # goes to a warm gold, and DarkGray lifts to a cool grey -
+                    # stock #767676 on navy is too dim to read the hint row.
+                    Palette = @{ DarkBlue = 0x1E3350; Cyan = 0x7FC8D8; DarkCyan = 0x4E8C99; Yellow = 0xF2C55C; DarkGray = 0x8C97A8 } }
+    paper      = @{ Bg = 'White';    Accent = 'DarkBlue'; Logo = 'DarkMagenta'; Info = 'DarkCyan';    Hint = 'DarkGray'; Text = 'Black'; Bright = 'DarkBlue'; Notice = 'DarkRed'; Scroll = 'DarkMagenta'; SelFg = 'White'
+                    # Warm off-white instead of stock white, and ink rather
+                    # than pure black on top of it - paper, not a lightbulb.
+                    # White is also SelFg here, so the text on the blue
+                    # selection bar picks up the same off-white. The rest are
+                    # pulled down to printed-ink weight: stock DarkCyan and
+                    # DarkMagenta are bright screen colours that wash out on a
+                    # light page, and stock DarkRed is a fire alarm.
+                    Palette = @{ White = 0xF2EDE3; Black = 0x1F1D1A; DarkBlue = 0x2B4C7E; DarkGray = 0x6B6660
+                                 DarkCyan = 0x2F7C8C; DarkMagenta = 0x7A3E86; DarkRed = 0xA83A32 } }
 }
 $themeName = if ($settings['Theme'] -and $themes.Contains([string]$settings['Theme'])) { [string]$settings['Theme'] } else { 'classic' }
 $theme = $themes[$themeName]
@@ -857,9 +886,92 @@ $theme = $themes[$themeName]
 # Black is enum 0, so these are compared against $null, never truthiness.
 $origFg = $null; $origBg = $null
 try { $origFg = $Host.UI.RawUI.ForegroundColor; $origBg = $Host.UI.RawUI.BackgroundColor } catch {}
+
+# --- Console palette (v1.1.5) -------------------------------------------
+# The RGB behind each of the 16 colour names, for THIS console window only,
+# via CONSOLE_SCREEN_BUFFER_INFO_EX. A ConsoleColor's enum value IS its index
+# in that table (both are the attribute bits: DarkBlue = FOREGROUND_BLUE = 1,
+# DarkRed = FOREGROUND_RED = 4, ...), so no mapping table is needed.
+#
+# Two traps in this API, both handled below: COLORREF is 0x00BBGGRR, so the
+# bytes are the reverse of the 0xRRGGBB literals the themes are written in;
+# and SetConsoleScreenBufferInfoEx reads srWindow as an INCLUSIVE rect while
+# Get hands one back EXCLUSIVE - passing it straight through shrinks the
+# window by a row and a column every single call.
+try {
+    Add-Type -Namespace CLIntPal -Name Win -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
+[StructLayout(LayoutKind.Sequential)] public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
+[StructLayout(LayoutKind.Sequential)] public struct BUFINFOEX {
+    public uint cbSize; public COORD dwSize; public COORD dwCursorPosition; public ushort wAttributes;
+    public SMALL_RECT srWindow; public COORD dwMaximumWindowSize; public ushort wPopupAttributes;
+    public bool bFullscreenSupported;
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public uint[] ColorTable; }
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetConsoleScreenBufferInfoEx(IntPtr h, ref BUFINFOEX i);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetConsoleScreenBufferInfoEx(IntPtr h, ref BUFINFOEX i);
+'@
+} catch {}
+
+function Get-ConsolePalette {
+    try {
+        $info = New-Object CLIntPal.Win+BUFINFOEX
+        $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
+        $h = [CLIntPal.Win]::GetStdHandle(-11)
+        if (-not [CLIntPal.Win]::GetConsoleScreenBufferInfoEx($h, [ref]$info)) { return $null }
+        return $info.ColorTable.Clone()
+    } catch { return $null }
+}
+
+# $table = the full 16-entry COLORREF array to install (as handed out by
+# Get-ConsolePalette), or $null to do nothing.
+function Set-ConsolePaletteTable($table) {
+    if (-not $table) { return }
+    try {
+        $info = New-Object CLIntPal.Win+BUFINFOEX
+        $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
+        $h = [CLIntPal.Win]::GetStdHandle(-11)
+        if (-not [CLIntPal.Win]::GetConsoleScreenBufferInfoEx($h, [ref]$info)) { return }
+        $info.ColorTable = $table
+        $r = $info.srWindow
+        # NB [int16], NOT [short] - PowerShell has no [short] accelerator, and
+        # the resulting "Unable to find type" lands in the catch below, so the
+        # whole palette silently does nothing (cost an hour once).
+        $r.Right = [int16]($r.Right + 1); $r.Bottom = [int16]($r.Bottom + 1)   # see the note above
+        $info.srWindow = $r
+        [CLIntPal.Win]::SetConsoleScreenBufferInfoEx($h, [ref]$info) | Out-Null
+    } catch {}
+}
+
+# The palette as the window was handed to us, so quitting puts it back (a dev
+# shell keeps its own look, same reasoning as $origFg/$origBg above).
+$origPalette = Get-ConsolePalette
+
+# Install the stock palette plus this theme's overrides. Always starts from
+# $origPalette, so switching from paper to classic drops paper's off-white
+# rather than leaving it behind for the next theme to inherit.
+function Set-ConsolePalette($overrides) {
+    if (-not $script:origPalette) { return }
+    $table = $script:origPalette.Clone()
+    if ($overrides) {
+        foreach ($name in $overrides.Keys) {
+            try {
+                $i = [int][System.ConsoleColor]$name
+                $rgb = [int]$overrides[$name]
+                # 0xRRGGBB -> COLORREF 0x00BBGGRR
+                $table[$i] = [uint32]((($rgb -band 0xFF) -shl 16) -bor ($rgb -band 0xFF00) -bor (($rgb -shr 16) -band 0xFF))
+            } catch {}
+        }
+    }
+    Set-ConsolePaletteTable $table
+}
+
 # Apply the current theme's console colours. Only takes effect on cells
 # painted after it, so every caller follows it with a full redraw.
 function Set-ThemeColors {
+    # Palette first: it repaints cells already on screen with the new RGBs,
+    # so doing it after the fg/bg set would flash the stock colour.
+    Set-ConsolePalette $script:theme.Palette
     try {
         $Host.UI.RawUI.BackgroundColor = $script:theme.Bg
         $Host.UI.RawUI.ForegroundColor = $script:theme.Text
@@ -3019,6 +3131,7 @@ try {
     # hand the console back the colours it had (a dev shell keeps its own
     # look; the app's own window is closing anyway)
     try {
+        Set-ConsolePaletteTable $script:origPalette   # undo any theme palette
         if ($null -ne $script:origBg) { $Host.UI.RawUI.BackgroundColor = $script:origBg }
         if ($null -ne $script:origFg) { $Host.UI.RawUI.ForegroundColor = $script:origFg }
     } catch {}
