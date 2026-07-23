@@ -121,6 +121,16 @@ try {
 # update, so the in-app corner display and the updater can compare.
 $appVersion = try { (Get-Content (Join-Path $script:rootDir 'version.txt') -TotalCount 1).Trim() } catch { '?' }
 
+# Global menu key (SETTINGS -> Menu key). Shared with Install.ps1 and
+# Uninstall.ps1 so all three talk to CLIntKey.ahk the same way. A flat copy
+# of CLInt.ps1 has no app\ folder to load it from - the menu still runs, the
+# one row that needs it says so.
+$script:hotkeyReady = $false
+try {
+    $hk = Join-Path $PSScriptRoot 'Hotkey.ps1'
+    if (Test-Path $hk) { . $hk; $script:hotkeyReady = $true }
+} catch {}
+
 # ------------------------------------------------------------- Steam ---
 function Get-SteamPath {
     $p = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue).SteamPath
@@ -696,6 +706,8 @@ namespace CLIntMouse {
     $script:mouseOk = $true
 } catch {}
 $script:mouseLeftWas = $false   # last seen left-button state, for press-edge detection
+$script:wheelY = -1             # pointer row at the last wheel notch
+$script:wheelSteps = 1          # notches collapsed into that one event
 $script:tabHit = @()            # tab-bar extents recorded by Draw-All: (x0, x1, index)
 # Modal mouse map: a modal publishes where its list rows sit (top row,
 # scroll offset, visible row count, entry count) and handles the
@@ -1102,6 +1114,10 @@ function Get-SettingsItems {
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Mouse'
                                 Name = ('Mouse support'.PadRight(30) + $(if ($script:mouseEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'MenuKey'
+                                Name = ('Menu key'.PadRight(30) +
+                                        $(if ($script:hotkeyReady) { Get-MenuKeySummary $script:rootDir }
+                                          else { 'unavailable - re-run Install.bat' })) }
     $list += [pscustomobject]@{ Key = 'TextSize'
                                 Name = ('Text size'.PadRight(30) + $script:textSizeName) }
     $list += [pscustomobject]@{ Key = 'Theme'
@@ -1196,13 +1212,38 @@ function Snap-Selection {
     $script:selected = $i
 }
 
+# Pull the viewport back around the selection. Every other caller adjusts
+# $offset itself as it moves the cursor; this is for the case where the
+# viewport changed size instead - a resize leaves $offset pointing where a
+# taller window used to reach, and the cursor off the bottom of the screen.
+function Snap-Viewport {
+    if ($script:items.Count -eq 0) { $script:offset = 0; return }
+    $maxOff = [Math]::Max(0, $script:items.Count - $script:visible)
+    if ($script:offset -gt $maxOff) { $script:offset = $maxOff }
+    if ($script:selected -lt $script:offset) { $script:offset = $script:selected }
+    if ($script:selected -ge $script:offset + $script:visible) {
+        $script:offset = $script:selected - $script:visible + 1
+    }
+    if ($script:offset -lt 0) { $script:offset = 0 }
+}
+
 $items = @(Get-TabItems 0)
 Snap-Selection
 
 function Write-At([int]$x, [int]$y, [string]$text, $fg, $bg) {
-    [Console]::SetCursorPosition($x, $y)
-    if ($bg) { Write-Host $text -ForegroundColor $fg -BackgroundColor $bg -NoNewline }
-    else     { Write-Host $text -ForegroundColor $fg -NoNewline }
+    # SetCursorPosition is bounded by the BUFFER, and the buffer can change
+    # under us between the layout that produced these coordinates and this
+    # write - a game switching resolution, the fullscreen transition
+    # settling, a window drag. A stale coordinate then throws, which killed
+    # the whole frame; on the mouse path (hover -> Draw-ScrollHints, at
+    # W - 2) it threw on every mouse movement and filled error.log. Skipping
+    # the write costs one smeared cell until the next redraw, which the
+    # resize check in Read-InputKey now schedules anyway.
+    try {
+        [Console]::SetCursorPosition($x, $y)
+        if ($bg) { Write-Host $text -ForegroundColor $fg -BackgroundColor $bg -NoNewline }
+        else     { Write-Host $text -ForegroundColor $fg -NoNewline }
+    } catch {}
 }
 
 function Pad([string]$s, [int]$width) {
@@ -1224,6 +1265,15 @@ function Get-Layout {
         if ([Console]::BufferWidth -ne $W -or [Console]::BufferHeight -ne $H) {
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($W, $H)
         }
+    } catch {}
+    # That pin is allowed to fail (a resize still in flight, a buffer conhost
+    # won't shrink right now), and it silently used to leave W/H describing a
+    # window LARGER than the buffer every draw is clipped to. Take whichever
+    # is smaller: an under-drawn row is a cosmetic miss until the next
+    # redraw; a coordinate past the buffer is an exception mid-frame.
+    try {
+        $script:W = [Math]::Min($script:W, [Console]::BufferWidth)
+        $script:H = [Math]::Min($script:H, [Console]::BufferHeight)
     } catch {}
     $script:listTop  = 7                       # header block height (6-row logos + gap)
     # $script: qualified on the READS too: an unqualified $H here resolves
@@ -1554,10 +1604,12 @@ function Read-MouseEvent {
             if (-not [CLIntMouse.Win]::PeekConsoleInput($hin, [ref]$r, 1, [ref]$got) -or $got -eq 0) { return $null }
             if ($r.EventType -ne 2) { return $null }   # a key is in front: ReadKey's turn
             [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$r, 1, [ref]$got) | Out-Null
-            if ($r.Flags -band 4) {   # wheel: plain arrows, so it works in modals too
+            if ($r.Flags -band 4) {   # wheel (delta sign lives in the high word)
                 $down = [bool]($r.Btn -band 0x80000000)
                 # collapse a queued burst of same-direction notches - a fast
-                # flick queues faster than a big-library redraw drains
+                # flick queues faster than a big-library redraw drains - but
+                # COUNT them, so a flick still travels as far as it was spun
+                $notches = 1
                 while ($true) {
                     $n2 = [uint32]0
                     if (-not [CLIntMouse.Win]::GetNumberOfConsoleInputEvents($hin, [ref]$n2) -or $n2 -eq 0) { break }
@@ -1567,8 +1619,22 @@ function Read-MouseEvent {
                     if ($p.EventType -ne 2 -or -not ($p.Flags -band 4) -or
                         ([bool]($p.Btn -band 0x80000000)) -ne $down) { break }
                     [CLIntMouse.Win]::ReadConsoleInput($hin, [ref]$p, 1, [ref]$g2) | Out-Null
+                    $notches++
                 }
-                if ($down) { return 'DownArrow' } else { return 'UpArrow' }
+                $script:wheelSteps = $notches
+                # Modals move their own cursor and have no viewport to scroll
+                # independently of it, so there the wheel stays a plain arrow.
+                if ($script:inModal) {
+                    if ($down) { return 'DownArrow' } else { return 'UpArrow' }
+                }
+                # On the main list it scrolls the VIEW instead. Moving the
+                # selection was self-defeating: the pointer hasn't moved, so
+                # the next mouse-move event hover-selected the row under it
+                # again and put the cursor straight back - the wheel looked
+                # dead. The row the pointer ends up over is recorded here
+                # because a wheel record carries the pointer position too.
+                $script:wheelY = $r.Y
+                if ($down) { return 'ScrollDown' } else { return 'ScrollUp' }
             }
             $leftNow = [bool]($r.Btn -band 1)
             $isMove  = [bool]($r.Flags -band 1)
@@ -1650,20 +1716,34 @@ function Read-InputKey {
         $k = Get-PadKey
         if ($null -ne $k) { return $k }
         # The window can resize while we sit here waiting (the fullscreen
-        # transition settles a beat after launch, frames get dragged), and
-        # a buffer wider than the window means a scrollbar until the next
+        # transition settles a beat after launch, a game changes resolution
+        # and hands the desktop back smaller, frames get dragged), and a
+        # buffer wider than the window means a scrollbar until the next
         # keypress triggered a redraw. Re-pin the buffer promptly instead.
-        # Buffer only - no redraw, because modals share this loop.
         if ([Environment]::TickCount -ge $script:bufferCheckNext) {
             $script:bufferCheckNext = [Environment]::TickCount + 300
+            $resized = $false
             try {
                 $cw = [Console]::WindowWidth
                 $ch = [Console]::WindowHeight
+                # Re-pinning the buffer to a window that SHRANK used to leave
+                # $W/$H describing the old, bigger one - and every draw between
+                # here and the next full redraw then wrote past the buffer's
+                # last column. Hover was the one that noticed, several times a
+                # second, because it repaints the scroll hints at W - 2.
+                $resized = ($cw -ne $script:W -or $ch -ne $script:H)
                 if ([Console]::BufferWidth -ne $cw -or [Console]::BufferHeight -ne $ch) {
                     $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cw, $ch)
                 }
             } catch {}
             Hide-Scrollbars   # conhost leaves stale bars behind after transient mismatches
+            if ($resized) {
+                Get-Layout        # geometry first: a modal repaints itself from it next frame
+                if (-not $script:inModal) {
+                    Snap-Viewport # a shorter viewport can leave the cursor off-screen
+                    Draw-All
+                }
+            }
             # clock/battery refresh (suppressed while a modal owns the screen)
             if (-not $script:inModal) {
                 if ([Environment]::TickCount -ge $script:batteryNext) {
@@ -1884,6 +1964,188 @@ function Read-TextInput([string]$title, [string]$current) {
             if ($p -eq [ConsoleKey]::Escape) { return $null }
             Start-Sleep -Milliseconds 16
         }
+    }
+}
+
+# Scrolling variant of Pick-Option, for lists longer than the screen
+# (Pick-Option draws every row it is handed, so the key list would run off
+# the bottom). Returns the chosen index, or -1 on cancel.
+function Pick-ScrollList([string]$title, [string]$hint, [string[]]$rows, [int]$start = 0) {
+    $script:inModal = $true
+    if ($rows.Count -eq 0) { return -1 }
+    $sel = [Math]::Max(0, [Math]::Min($start, $rows.Count - 1))
+    $off = 0
+    Clear-Host
+    Get-Layout
+    while ($true) {
+        Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+        Write-At 2 2 (Pad $hint ($W - 4)) $theme.Hint
+        $top = 4
+        $vis = [Math]::Max(1, $H - $top - 1)
+        if ($sel -lt $off) { $off = $sel }
+        if ($sel -ge $off + $vis) { $off = $sel - $vis + 1 }
+        $rowW = $W - 3   # NOT $w - see the note in the folder picker
+        for ($r = 0; $r -lt $vis; $r++) {
+            $i = $off + $r
+            if ($i -lt $rows.Count) {
+                if ($i -eq $sel) { Write-At 1 ($top + $r) (Pad ('  >> ' + $rows[$i] + '  ') $rowW) $theme.SelFg $theme.Accent }
+                else             { Write-At 1 ($top + $r) (Pad ('     ' + $rows[$i] + '  ') $rowW) $theme.Text }
+            } else {
+                Write-At 1 ($top + $r) (' ' * $rowW) $theme.Text
+            }
+        }
+        $script:modalTop = $top; $script:modalOff = $off
+        $script:modalRows = $vis; $script:modalCount = $rows.Count
+        switch (Read-InputKey) {
+            'UpArrow'    { $sel = ($sel - 1 + $rows.Count) % $rows.Count }
+            'DownArrow'  { $sel = ($sel + 1) % $rows.Count }
+            'MouseHover' { $sel = $script:modalHover }
+            { "$_" -in 'Enter', 'MouseClick' } {
+                if ("$_" -eq 'MouseClick') { $sel = $script:modalHover }
+                return $sel
+            }
+            'Escape' { return -1 }
+            'Q'      { return -1 }
+        }
+    }
+}
+
+# Full-screen "hold on" line. Setting the key waits on the hotkey script's
+# reply (a second or two at worst), and a frozen menu with no explanation
+# reads as a crash.
+function Show-Working([string]$title, [string]$line) {
+    $script:inModal = $true
+    $script:modalTop = -1   # no rows: nothing for the mouse to hit-test
+    Clear-Host
+    Get-Layout
+    Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+    Write-At 2 3 (Pad $line ($W - 4)) $theme.Text
+}
+
+# Capture one keypress, raw. Modifier keys don't arrive on their own, so
+# Ctrl+Alt+M comes through as a single event with its modifiers attached.
+function Read-MenuKeyPress {
+    $script:inModal = $true
+    $script:modalTop = -1
+    Clear-Host
+    Get-Layout
+    Write-At 2 0 (Pad 'MENU KEY  --  PRESS THE KEY YOU WANT' ($W - 4)) $theme.Accent
+    Write-At 2 2 (Pad 'The current menu key is switched off, so it cannot open CLInt over this screen.' ($W - 4)) $theme.Info
+    Write-At 2 4 (Pad 'Hold Fn if the key needs it, and press it exactly as you normally would.' ($W - 4)) $theme.Text
+    Write-At 2 5 (Pad "If nothing registers, or the wrong key is detected, go back and choose from" ($W - 4)) $theme.Text
+    Write-At 2 6 (Pad "the list instead - that binds by name and ignores how your keyboard sends it." ($W - 4)) $theme.Text
+    Write-At 2 8 (Pad '[ Esc / B: cancel ]' ($W - 4)) $theme.Hint
+    while ($true) {
+        if ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq [ConsoleKey]::Escape -and $k.Modifiers -eq 0) { return $null }
+            $name = Convert-KeyPressToAhk $k
+            if ($name) { return $name }
+        }
+        if ((Get-PadKey) -eq [ConsoleKey]::Escape) { return $null }
+        Start-Sleep -Milliseconds 16
+    }
+}
+
+# SETTINGS -> Menu key. Everything about the global hotkey lives here now:
+# re-running the installer to change it meant typing at a console that the
+# old key could (and did) bury under a fresh copy of CLInt.
+function Configure-MenuKey {
+    if (-not $script:hotkeyReady) {
+        $script:pendingNotice = 'Menu key setup needs app\Hotkey.ps1 - re-run Install.bat.'
+        return
+    }
+    if (-not (Find-AhkExe)) {
+        # A global hotkey has to live in something that is always running;
+        # AutoHotkey v2 is that something.
+        $c = Pick-Option 'MENU KEY  --  this needs AutoHotkey v2 (free, and CLInt is its only user here)' @(
+            'Install AutoHotkey v2 now (winget)', 'Not now')
+        if ($c -ne 0) { return }
+        Clear-Host
+        Write-Host ""
+        Write-Host "   INSTALLING AUTOHOTKEY V2..." -ForegroundColor $theme.Accent
+        Write-Host ""
+        try { winget install --id AutoHotkey.AutoHotkey --accept-source-agreements --accept-package-agreements } catch {}
+        if (-not (Find-AhkExe)) {
+            Write-Host ""
+            Write-Host "   Still not found - install it from autohotkey.com, then come back here." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "   press any button to go back" -ForegroundColor $theme.Hint
+            $script:inModal = $true   # the menu geometry is gone from this screen
+            Read-InputKey | Out-Null
+            return
+        }
+    }
+    while ($true) {
+        $curKey = Get-MenuKeyName $script:rootDir
+        $st     = Get-MenuKeyStatus $script:rootDir
+        if (-not $curKey -and $st) { $curKey = $st.Key }
+        $title = "MENU KEY  --  currently: $(Get-MenuKeyLabel $curKey)"
+        if ($st -and $st.State -in 'fail', 'unknown') { $title += '   (not working - pick another)' }
+        $opts = @('Choose from a list  (the reliable way for Fn-layer keys)',
+                  'Press the key I want to use',
+                  'Turn the menu key off',
+                  'Done')
+        $c = Pick-Option $title $opts
+        if ($c -lt 0 -or $c -eq 3) { return }
+
+        if ($c -eq 2) {
+            Show-Working 'MENU KEY' 'Turning the menu key off...'
+            $script:pendingNotice = (Set-MenuKey $script:rootDir 'off').Message
+            return
+        }
+
+        # Kill the current binding BEFORE asking for a new one. Re-binding
+        # the key you already use means pressing it while it still works,
+        # which used to launch CLInt on top of the thing doing the rebind.
+        Show-Working 'MENU KEY' 'Releasing the current key...'
+        $sus = Suspend-MenuKey $script:rootDir
+        if (-not $sus.Ok) {
+            # The old key might still be live, so nobody gets asked to PRESS
+            # one - that press would open CLInt over the screen asking for
+            # it, which is the whole bug. Choosing by name is unaffected, so
+            # offer that rather than dead-ending here.
+            if ((Pick-Option "MENU KEY  --  $($sus.Message)" @('Choose from a list anyway', 'Cancel')) -ne 0) {
+                Set-MenuKey $script:rootDir $curKey | Out-Null   # leave the old binding as we found it
+                return
+            }
+            $c = 0
+        }
+
+        $chosen = $null
+        if ($c -eq 0) {
+            $choices = @(Get-MenuKeyChoices)
+            $rows    = @($choices | ForEach-Object { $_.Label.PadRight(20) + $_.Hint })
+            $start   = [Math]::Max(0, [array]::IndexOf(@($choices | ForEach-Object { $_.Key }), $curKey))
+            $pick = Pick-ScrollList 'MENU KEY  --  CHOOSE A KEY' `
+                        '[ D-pad: move    A: choose    B: cancel ]' $rows $start
+            if ($pick -ge 0) { $chosen = $choices[$pick].Key }
+        } else {
+            while (-not $chosen) {
+                $name = Read-MenuKeyPress
+                if (-not $name) { break }
+                $lbl = Get-MenuKeyLabel $name
+                $warn = if (Test-MenuKeyIsTypingKey $name) {
+                    '   WARNING: a typing key opens the menu every time you press it, everywhere'
+                } else { '' }
+                $c2 = Pick-Option "DETECTED: $lbl$warn" @("Use $lbl", 'That is the wrong key - press again', 'Cancel')
+                if ($c2 -eq 0) { $chosen = $name } elseif ($c2 -ne 1) { break }
+            }
+        }
+
+        # Cancelled anywhere above: put back exactly what was there before,
+        # because the release step already switched it off.
+        if (-not $chosen) {
+            Show-Working 'MENU KEY' 'Restoring the previous key...'
+            Set-MenuKey $script:rootDir $curKey | Out-Null
+            return
+        }
+
+        Show-Working 'MENU KEY' "Setting $(Get-MenuKeyLabel $chosen)..."
+        $res = Set-MenuKey $script:rootDir $chosen
+        $script:pendingNotice = $res.Message
+        if ($res.Ok) { return }
+        if ((Pick-Option "MENU KEY  --  $($res.Message)" @('Try another key', 'Leave it')) -ne 0) { return }
     }
 }
 
@@ -2147,6 +2409,37 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
     }
 }
 
+# Wheel scrolling: move the VIEWPORT, the way dragging a scrollbar does,
+# leaving the cursor to follow the pointer. Every other navigation moves the
+# cursor and lets the viewport chase it; this is the one that works the
+# other way round, because a wheel scrolls a page - it doesn't pick things.
+function Scroll-List([int]$rows) {
+    if ($script:items.Count -eq 0) { return }
+    $maxOff = [Math]::Max(0, $script:items.Count - $script:visible)
+    $new = [Math]::Min([Math]::Max(0, $script:offset + $rows), $maxOff)
+    if ($new -eq $script:offset) { return }   # already at the end: nothing to repaint
+    Clear-Notice
+    $script:offset = $new
+    # The pointer sat still while the list moved underneath it, so the
+    # highlight goes to whatever is under it now - the same rule hover
+    # already follows, which is what stops the two fighting.
+    $i = $script:wheelY - $script:listTop + $script:offset
+    if ($script:wheelY -ge $script:listTop -and $script:wheelY -lt $script:listTop + $script:visible -and
+        $i -lt $script:items.Count -and -not $script:items[$i].Unselectable) {
+        $script:selected = $i
+    } else {
+        # Pointer off the list, or on a section title: keep the cursor where
+        # it was, but never let it scroll off the screen - A has to launch
+        # something the user can still see.
+        if ($script:selected -lt $script:offset) { $script:selected = $script:offset }
+        elseif ($script:selected -ge $script:offset + $script:visible) {
+            $script:selected = $script:offset + $script:visible - 1
+        }
+        Snap-Selection
+    }
+    Draw-List
+}
+
 function Move-Selection([int]$delta) {
     if ($items.Count -eq 0) { return }
     Clear-Notice
@@ -2213,6 +2506,10 @@ try {
         switch ($key) {
             'UpArrow'   { Move-Selection -1 }
             'DownArrow' { Move-Selection 1 }
+            # Three rows a notch, Windows' own wheel default, and never more
+            # than a screenful however hard it was flicked.
+            'ScrollUp'   { Scroll-List (-[Math]::Min($visible, 3 * $script:wheelSteps)) }
+            'ScrollDown' { Scroll-List ([Math]::Min($visible, 3 * $script:wheelSteps)) }
             'PageDown'  {   # LB: a page at a time, clamped to the end -
                             # free-running modulo math on a list barely
                             # longer than a page LOOKS like reverse cycling
@@ -2369,6 +2666,7 @@ try {
                                 Hide-Scrollbars
                             }
                         }
+                        'MenuKey' { Configure-MenuKey }
                         'Theme'  {
                             $names = @($themes.Keys)
                             $c = Pick-Option 'COLOR THEME' ($names + @('Cancel'))

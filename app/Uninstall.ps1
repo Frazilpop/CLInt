@@ -54,10 +54,18 @@ foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'"
     try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
     Write-Host "  Stopped running CLInt (PID $($p.ProcessId))" -ForegroundColor Green
 }
-foreach ($p in @(Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })) {
-    try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
-    Write-Host "  Stopped the hotkey script (PID $($p.ProcessId))" -ForegroundColor Green
+# The hotkey script gets asked to quit before it gets killed: Stop-Process
+# cannot touch a copy that was started elevated, and that copy would then
+# keep the key working long after the uninstall said it was gone.
+. (Join-Path $here 'Hotkey.ps1')
+if (Test-HotkeyRunning) {
+    if (Stop-HotkeyScript $root) {
+        Write-Host "  Stopped the hotkey script" -ForegroundColor Green
+    } else {
+        Write-Host "  The hotkey script would not stop (started as administrator?)." -ForegroundColor Yellow
+        Write-Host "  It goes away at your next sign-in; end AutoHotkey in Task Manager" -ForegroundColor Yellow
+        Write-Host "  to be rid of it now." -ForegroundColor Yellow
+    }
 }
 
 # --- 2. Shortcuts, startup entry and the staged icon -------------------

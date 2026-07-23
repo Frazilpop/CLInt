@@ -115,27 +115,12 @@ if ($vlcFound) {
 # Entirely skippable - the desktop shortcut is a complete install on its
 # own. The binding needs AutoHotkey v2 (tiny, free), because a global
 # hotkey has to live in something that's always running.
-function Find-Ahk {
-    # _UIA first. That build runs with UI Access, and without it a global
-    # hotkey silently stops working whenever anything elevated is in front
-    # (a game with anti-cheat, an admin console): Windows won't deliver the
-    # key to a lower-privilege process, and won't let it pull a window to
-    # the foreground either. It only exists in an admin-installed
-    # AutoHotkey, hence the plain build right behind it.
-    $roots = @("$env:ProgramFiles\AutoHotkey\v2", "${env:ProgramFiles(x86)}\AutoHotkey\v2",
-               "$env:LOCALAPPDATA\Programs\AutoHotkey\v2")
-    foreach ($exe in @('AutoHotkey64_UIA.exe', 'AutoHotkey64.exe', 'AutoHotkey32.exe', 'AutoHotkey.exe')) {
-        foreach ($r in $roots) { if (Test-Path (Join-Path $r $exe)) { return (Join-Path $r $exe) } }
-    }
-    return $null
-}
-
-# Is the hotkey script actually running? The only answer that matters -
-# every earlier failure here was silent.
-function Test-HotkeyLive {
-    return [bool]@(Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })
-}
+#
+# The mechanics live in Hotkey.ps1, shared with CLInt's own SETTINGS ->
+# Menu key screen, which is where CHANGING the key belongs now. Doing that
+# from here meant typing at a console that the old key could bury under a
+# fresh copy of CLInt - see the header of Hotkey.ps1.
+. (Join-Path $here 'Hotkey.ps1')
 
 Write-Host ""
 # Nothing in this section may take the installer down with it: a hotkey is
@@ -150,95 +135,91 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
     if (-not $startupDir) { $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup' }
     Remove-Item (Join-Path $startupDir 'CLIntKey.lnk') -Force -ErrorAction SilentlyContinue
 
-    $ahk = Find-Ahk
+    $ahk = Find-AhkExe
     if (-not $ahk) {
         if (Read-YesNo "That needs AutoHotkey v2, which isn't installed. Install it via winget?") {
             try {
                 winget install --id AutoHotkey.AutoHotkey --accept-source-agreements --accept-package-agreements
             } catch {}
-            $ahk = Find-Ahk
+            $ahk = Find-AhkExe
         }
         if (-not $ahk) {
             Write-Host "  AutoHotkey not available - skipping the hotkey. Install it from" -ForegroundColor Yellow
-            Write-Host "  https://www.autohotkey.com (v2) and run Install.bat again any time." -ForegroundColor Yellow
+            Write-Host "  https://www.autohotkey.com (v2), then set the key in CLInt:" -ForegroundColor Yellow
+            Write-Host "  SETTINGS -> Menu key." -ForegroundColor Yellow
         }
     }
 
     if ($ahk) {
         Write-Host "  AutoHotkey found: $ahk" -ForegroundColor Green
         Write-Host ""
-        Write-Host "  Press the key you want to use, now." -ForegroundColor Cyan
-        Write-Host "  Best picks are keys you never type with: a handheld's menu/page" -ForegroundColor DarkGray
-        Write-Host "  key, a spare F-key, a macro key. Esc keeps the default (AppsKey," -ForegroundColor DarkGray
-        Write-Host "  the menu key found next to right Ctrl on full keyboards)." -ForegroundColor DarkGray
-        $k = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-        $vk = $k.VirtualKeyCode
+        # Reinstalling over a working hotkey: switch the old binding off
+        # first, or the key you are about to press launches CLInt over this
+        # window mid-setup.
+        $sus = Suspend-MenuKey $root
+        if (-not $sus.Ok) { Write-Host "  $($sus.Message)" -ForegroundColor Yellow }
 
-        # Translate the virtual-key code into an AutoHotkey key name.
         $keyName = 'AppsKey'
-        if ($vk -eq 0x1B) {
-            Write-Host "  Keeping the default: AppsKey" -ForegroundColor Green
-        } elseif ($vk -eq 0x5D) {
-            Write-Host "  Bound: AppsKey (menu key)" -ForegroundColor Green
-        } elseif ($vk -ge 0x70 -and $vk -le 0x87) {
-            $keyName = "F$($vk - 0x6F)"
-            Write-Host "  Bound: $keyName" -ForegroundColor Green
-        } else {
-            # Any other key by raw virtual-key code - AutoHotkey accepts vkXX.
-            $keyName = 'vk{0:X2}' -f $vk
-            $shown = if ($k.Character -and -not [char]::IsControl($k.Character)) { "'$($k.Character)' ($keyName)" } else { $keyName }
-            Write-Host "  Bound: $shown" -ForegroundColor Green
-            if ($k.Character -match '[a-zA-Z0-9 ]') {
+        $mode = Read-Choice 'How do you want to choose the key?' @(
+            'Pick from a list  (the reliable way for Fn-layer keys)',
+            'Press the key I want to use',
+            'Use AppsKey  (the menu key next to right Ctrl)')
+        if ($mode -eq 0) {
+            # Two steps, because a console chooser can only show a screenful
+            # and the full list is longer than that.
+            $groups = @(Get-MenuKeyGroups)
+            Write-Host ""
+            $g = Read-Choice 'Which kind of key?' $groups
+            $picks = @(Get-MenuKeyChoices | Where-Object { $_.Group -eq $groups[$g] })
+            Write-Host ""
+            $p = Read-Choice $groups[$g] @($picks | ForEach-Object { $_.Label.PadRight(18) + $_.Hint })
+            $keyName = $picks[$p].Key
+        } elseif ($mode -eq 1) {
+            Write-Host ""
+            Write-Host "  Press the key you want to use, now." -ForegroundColor Cyan
+            Write-Host "  Hold Fn as well if the key needs it. Esc keeps AppsKey." -ForegroundColor DarkGray
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -ne [ConsoleKey]::Escape) {
+                $captured = Convert-KeyPressToAhk $k
+                if ($captured) { $keyName = $captured }
+            }
+            if (Test-MenuKeyIsTypingKey $keyName) {
                 Write-Host "  Heads-up: that's a typing key - it will open the menu EVERY time" -ForegroundColor Yellow
-                Write-Host "  you press it, everywhere. Re-run Install.bat to change it." -ForegroundColor Yellow
+                Write-Host "  you press it, everywhere. Change it in SETTINGS -> Menu key." -ForegroundColor Yellow
             }
         }
-        Set-Content -Path (Join-Path $dataDir 'menu-key.txt') -Value $keyName -Encoding Ascii
 
-        # Load at logon from HKCU ...\Run, not a shortcut in the Startup
-        # folder. GetFolderPath('Startup') returns an EMPTY string whenever
-        # that shell folder points somewhere that no longer exists - and the
-        # Join-Path failure that followed killed this installer outright,
-        # right here, leaving no startup entry, no running hotkey and no
-        # error anyone would see. A registry value has nothing to resolve.
-        $ahkArgs = "`"$(Join-Path $here 'CLIntKey.ahk')`""
-        $runKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        if (-not (Test-Path $runKey)) { New-Item $runKey -Force | Out-Null }
-        Set-ItemProperty $runKey -Name 'CLIntKey' -Value "`"$ahk`" $ahkArgs"
-        Write-Host "  Startup entry created (hotkey loads on every boot)" -ForegroundColor Green
-
-        # Replace any copy already running, then confirm ours stayed up -
-        # the _UIA build refuses to start on some systems, and a hotkey that
-        # died on launch is indistinguishable from one that was never set up.
-        foreach ($p in @(Get-CimInstance Win32_Process |
-                Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -match 'CLIntKey\.ahk' })) {
-            try { Stop-Process -Id $p.ProcessId -Force -Confirm:$false } catch {}
-        }
-        Start-Process $ahk -ArgumentList $ahkArgs
-        Start-Sleep -Milliseconds 900
-        if (-not (Test-HotkeyLive) -and $ahk -match '_UIA' -and (Test-Path ($ahk -replace '_UIA', ''))) {
-            $ahk = $ahk -replace '_UIA', ''
-            Write-Host "  UI Access build wouldn't start - using $(Split-Path $ahk -Leaf)." -ForegroundColor Yellow
-            Set-ItemProperty $runKey -Name 'CLIntKey' -Value "`"$ahk`" $ahkArgs"
-            Start-Process $ahk -ArgumentList $ahkArgs
-            Start-Sleep -Milliseconds 900
-        }
-        if (Test-HotkeyLive) {
-            Write-Host "  Hotkey is active NOW - press $keyName to test." -ForegroundColor Cyan
+        # Set-MenuKey writes the binding, registers the logon entry (HKCU
+        # ...\Run, not a Startup shortcut: GetFolderPath('Startup') returns
+        # an EMPTY string when that shell folder points somewhere that no
+        # longer exists, and the Join-Path failure that followed used to
+        # kill this installer outright), starts the script, and waits for it
+        # to confirm the key is really registered.
+        Write-Host ""
+        # Register the logon entry outright. Set-MenuKey only touches it
+        # when it has to start the script, and a script that happens to be
+        # running already would otherwise leave a fresh install with no way
+        # back after a reboot.
+        try { Register-HotkeyStartup $root $ahk } catch {}
+        Write-Host "  Setting $(Get-MenuKeyLabel $keyName)..." -ForegroundColor DarkGray
+        $res = Set-MenuKey $root $keyName
+        if ($res.Ok) {
+            Write-Host "  $($res.Message)" -ForegroundColor Cyan
+            Write-Host "  Loads on every boot. Change it any time in SETTINGS -> Menu key." -ForegroundColor Green
         } else {
-            Write-Host "  The hotkey script did not stay running. Start it by hand to" -ForegroundColor Yellow
-            Write-Host "  see the error: `"$ahk`" $ahkArgs" -ForegroundColor Yellow
+            Write-Host "  $($res.Message)" -ForegroundColor Yellow
+            Write-Host "  Try another key in CLInt: SETTINGS -> Menu key." -ForegroundColor Yellow
         }
     }
 } else {
-    Write-Host "  Skipped. The desktop shortcut does everything; re-run Install.bat" -ForegroundColor DarkGray
-    Write-Host "  if you want the hotkey later." -ForegroundColor DarkGray
+    Write-Host "  Skipped. The desktop shortcut does everything; SETTINGS -> Menu key" -ForegroundColor DarkGray
+    Write-Host "  sets one up later if you want it." -ForegroundColor DarkGray
 }
 } catch {
     Write-Host ""
     Write-Host "  Hotkey setup didn't complete: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "  Everything else is installed and working - re-run Install.bat" -ForegroundColor Yellow
-    Write-Host "  to try the hotkey again." -ForegroundColor Yellow
+    Write-Host "  Everything else is installed and working - SETTINGS -> Menu key" -ForegroundColor Yellow
+    Write-Host "  inside CLInt sets the key up without re-running this installer." -ForegroundColor Yellow
 }
 
 Write-Host ""

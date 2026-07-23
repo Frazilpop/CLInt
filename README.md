@@ -67,24 +67,46 @@ highlighted game.
 The controller is read natively via XInput. Keyboard works too.
 
 The mouse works as well: hover to highlight, click to launch, click a
-tab name to switch to it, and scroll with the wheel. It can be turned
-off with **SETTINGS → Mouse support**.
+tab name to switch to it. The wheel scrolls the page like a scrollbar —
+three rows a notch, further for a flick — and the highlight follows
+whatever ends up under the pointer. It can all be turned off with
+**SETTINGS → Mouse support**.
 
 ## HotKey
 
-During installation there is the option to bind a global hardware key
-that opens/hides the CLInt menu from anywhere: this requires AutoHotkey v2, which is installed if
-you agree. This can be skipped if you're prefer, and CLInt can still be loaded from the desktop shortcut.
+A global hardware key that opens/hides the CLInt menu from anywhere. The
+installer offers to set one up, and **SETTINGS → Menu key** is where it
+lives from then on — choose a key, change it, or switch it off, without
+going near the installer. It needs AutoHotkey v2, which either side will
+install for you. Skipping it entirely is fine; the desktop shortcut does
+the same job.
+
+Two ways to choose the key:
+
+- **From a list** — F13–F24, the F-keys, the menu key, media and macro
+  keys, or a Ctrl+Alt combination. This is the one to use if the key you
+  want sits on an Fn layer: it binds by name, so it doesn't matter how
+  (or whether) your keyboard reports the Fn press itself.
+- **By pressing it** — the current key is switched off first, so pressing
+  it can't open CLInt over the top of the screen asking for it. What was
+  detected is shown for confirmation before anything is bound.
+
+Changing the key never restarts anything: the binding is a single file
+(`data\menu-key.txt`) that the hotkey script watches. That matters,
+because restarting it was where rebinding used to break — AutoHotkey's
+"could not close the existing instance", two scripts fighting for one
+key, or none left at all. The script reports back what it actually bound,
+so SETTINGS shows you the truth (`F13`, or `F13 (not working)`) instead
+of what was merely asked for.
 
 The key press itself does nothing but read `data\clint.hwnd` — the window
 handle CLInt records at startup — so it stays instant, and there is no
-process scanning to be slow or fail. The installer loads the key at logon
-from `HKCU\...\Run`, prefers AutoHotkey's UI Access build (so the key
-still fires when something elevated is in front), and tells you whether
-the hotkey is actually running rather than assuming it is.
+process scanning to be slow or fail. It loads at logon from
+`HKCU\...\Run` and prefers AutoHotkey's UI Access build, so the key still
+fires when something elevated is in front.
 
-Press it and nothing happens? Check the tray for the CLInt icon (its
-tooltip names the bound key). If it isn't there, re-run `Install.bat`.
+Press it and nothing happens? **SETTINGS → Menu key** shows whether it is
+bound; the tray icon's tooltip names the key too.
 
 ## Updating
 
