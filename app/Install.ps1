@@ -161,7 +161,7 @@ if (Read-YesNo 'Bind a hardware key that opens/hides the menu from anywhere?') {
 
         $keyName = 'AppsKey'
         $mode = Read-Choice 'How do you want to choose the key?' @(
-            'Pick from a list  (the reliable way for Fn-layer keys)',
+            'Pick from a list',
             'Press the key I want to use',
             'Use AppsKey  (the menu key next to right Ctrl)')
         if ($mode -eq 0) {
