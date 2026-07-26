@@ -157,17 +157,36 @@ function Start-SteamGame($launchId) {
     }
 }
 
-function Get-InstalledGames {
+# Every library root Steam knows about - the install itself plus whatever
+# libraryfolders.vdf lists. Falls back to the install when that file is
+# missing or lists nothing, so a library is never scanned as empty.
+function Get-SteamLibraryPaths {
     $steam = Get-SteamPath
     $vdfPath = Join-Path $steam 'steamapps\libraryfolders.vdf'
-    $libs = @($steam)
     if (Test-Path $vdfPath) {
         $vdf = Get-Content $vdfPath -Raw
-        $libs = [regex]::Matches($vdf, '"path"\s+"([^"]+)"') |
+        $libs = @([regex]::Matches($vdf, '"path"\s+"([^"]+)"') |
             ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' } |
-            Select-Object -Unique
+            Select-Object -Unique)
+        if ($libs.Count -gt 0) { return $libs }
     }
-    $games = foreach ($lib in $libs) {
+    return @($steam)
+}
+
+# Where Steam records that an app is installed. Watching this file vanish
+# is how the uninstall menu knows the user went through with it.
+function Get-AppManifestPath([string]$appid) {
+    try {
+        foreach ($lib in (Get-SteamLibraryPaths)) {
+            $p = Join-Path $lib "steamapps\appmanifest_$appid.acf"
+            if (Test-Path $p) { return $p }
+        }
+    } catch {}
+    return $null
+}
+
+function Get-InstalledGames {
+    $games = foreach ($lib in (Get-SteamLibraryPaths)) {
         foreach ($m in (Get-ChildItem (Join-Path $lib 'steamapps\appmanifest_*.acf') -ErrorAction SilentlyContinue)) {
             $c = Get-Content $m.FullName -Raw
             $name  = [regex]::Match($c, '"name"\s+"([^"]+)"').Groups[1].Value
@@ -175,7 +194,10 @@ function Get-InstalledGames {
             $installdir = [regex]::Match($c, '"installdir"\s+"([^"]+)"').Groups[1].Value
             if ($name -and $appid -and $name -notmatch 'Redistributables|Steamworks Common') {
                 $dir = if ($installdir) { Join-Path $lib "steamapps\common\$installdir" } else { $null }
-                [pscustomobject]@{ Name = $name; AppId = $appid; LaunchId = $appid; Exe = $null; Dir = $dir }
+                # Steam = a real store app, so it has playtime on record.
+                # Non-Steam shortcuts below are marked $false: Steam counts
+                # no time for those, and CLInt no longer counts its own.
+                [pscustomobject]@{ Name = $name; AppId = $appid; LaunchId = $appid; Exe = $null; Dir = $dir; Steam = $true }
             }
         }
     }
@@ -245,6 +267,7 @@ function Get-NonSteamGames {
             LaunchId = ([uint64]$appid -shl 32) -bor 0x02000000
             Exe      = $exe
             Dir      = $null
+            Steam    = $false
         }
     }
     return @($found | Sort-Object Name)
@@ -281,6 +304,46 @@ function Get-SteamCollections {
     } catch {}
     $script:steamCols = @($cols.Values | Sort-Object Name)
     return $script:steamCols
+}
+
+# Steam's own playtime, from the live account's localconfig.vdf. Each app
+# is a "<appid>" block under "apps" holding two counters, both in minutes:
+# "Playtime" is what the server knows about, "PlaytimeDisconnected" is time
+# played offline that hasn't synced yet. Steam totals the pair, so we do too
+# - otherwise an offline session looks like it never happened.
+#
+# Read in one regex pass: an appid is a numeric key followed by a brace, and
+# every Playtime line after it belongs to that app until the next one starts.
+# The counters only ever appear inside this section, so there is no need to
+# find the section first.
+#
+# Steam flushes this file periodically rather than on every exit, so a
+# just-finished session can take a moment to land. The cache is dropped
+# after each game to pick up the new figure as soon as it is written.
+$script:steamPlaytime = $null
+function Get-SteamPlaytime {
+    if ($null -ne $script:steamPlaytime) { return $script:steamPlaytime }
+    $map = @{}
+    try {
+        $dir = Get-SteamUserDir
+        if ($dir) {
+            $lc = Join-Path $dir 'config\localconfig.vdf'
+            if (Test-Path $lc) {
+                # ReadAllText, not Get-Content -Raw: this file runs to a few
+                # hundred KB and the cmdlet's overhead on it is visible in the
+                # first paint.
+                $raw = [System.IO.File]::ReadAllText($lc)
+                $cur = $null
+                foreach ($m in [regex]::Matches($raw,
+                        '"(\d+)"\s*\r?\n\s*\{|"(?:Playtime|PlaytimeDisconnected)"\s+"(\d+)"')) {
+                    if ($m.Groups[1].Success) { $cur = $m.Groups[1].Value }
+                    elseif ($cur)             { $map[$cur] = [int]$map[$cur] + [int]$m.Groups[2].Value }
+                }
+            }
+        }
+    } catch {}
+    $script:steamPlaytime = $map
+    return $map
 }
 
 # ----------------------------------------------------------- Settings ---
@@ -658,6 +721,15 @@ function Show-MenuWindow {
     try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
 }
 
+# Get out of the way of a window that is about to open behind us. Steam's
+# uninstall prompt is the case that needs it: a maximised menu would hide
+# the very dialog the user has to answer.
+function Hide-MenuWindow {
+    if ($script:conHwnd -ne [IntPtr]::Zero) {
+        try { [CLIntFocus.Win]::ShowWindow($script:conHwnd, 6) | Out-Null } catch {}   # SW_MINIMIZE
+    }
+}
+
 # The WELCOME BACK landing screen. Painted by Wait-ForGameExit WHILE the
 # game still runs (the console sits hidden behind it showing the stale
 # LAUNCHING screen, and the instant the game window closes Windows exposes
@@ -728,6 +800,7 @@ namespace CLIntMouse {
     $script:mouseOk = $true
 } catch {}
 $script:mouseLeftWas = $false   # last seen left-button state, for press-edge detection
+$script:mouseRightWas = $false  # same for the right button, which opens the item menu
 $script:wheelY = -1             # pointer row at the last wheel notch
 $script:wheelSteps = 1          # notches collapsed into that one event
 # Pointer cell last seen, and whether hover is currently muted. conhost
@@ -1043,9 +1116,9 @@ $textSizeName = if ($settings['TextSize'] -and $textSizes.Contains([string]$sett
 # what the gamepad's RB arrives as.
 $hintWords = @{
     gamepad  = @{ Move = 'D-pad: move';  Tab = '</>: switch tab'; A = 'A';     B = 'B'
-                  RB   = 'RB';           EnterA = 'Enter/A';      EscB = 'Esc/B' }
+                  RB   = 'RB';           EnterA = 'Enter/A';      EscB = 'Esc/B'; Y = 'Y' }
     keyboard = @{ Move = 'Arrows: move'; Tab = 'Left/Right: tab'; A = 'Enter'; B = 'Esc'
-                  RB   = 'F5';           EnterA = 'Enter';        EscB = 'Esc' }
+                  RB   = 'F5';           EnterA = 'Enter';        EscB = 'Esc';   Y = 'M' }
 }
 $controlHints = if ([string]$settings['ButtonHints'] -eq 'keyboard') { 'keyboard' } else { 'gamepad' }
 
@@ -1057,11 +1130,12 @@ function Hint([string]$s) {
 
 # Behaviour toggles (all in SETTINGS). Clock/battery/recently-played
 # default on; the launch-time update check is opt-in.
-$showClock     = $settings['ShowClock']       -ne $false
-$showBattery   = $settings['ShowBattery']     -ne $false
-$recentEnabled = $settings['Recent']          -ne $false
-$autoCheck     = $settings['AutoUpdateCheck'] -eq $true
-$mouseEnabled  = $settings['Mouse']           -ne $false
+$showClock       = $settings['ShowClock']       -ne $false
+$showBattery     = $settings['ShowBattery']     -ne $false
+$recentEnabled   = $settings['Recent']          -ne $false
+$playtimeEnabled = $settings['Playtime']        -ne $false
+$autoCheck       = $settings['AutoUpdateCheck'] -eq $true
+$mouseEnabled    = $settings['Mouse']           -ne $false
 $inModal = $false        # modals suppress the idle clock/battery repaint
 $batteryPct = -1
 $batteryNext = 0
@@ -1071,9 +1145,10 @@ $statusDrawnLen = 0      # width of the last corner draw, for clean blanking
 $statusReserved = 0      # corner columns the tab bar left free at last full draw
 $updateNoticeShown = $false
 
-# Recently played: recent.json maps a game key (AppId / local:<name>)
-# to last-played time and total minutes. Only touched while the feature
-# is enabled.
+# Recently played: recent.json maps a game key (AppId / local:<name>) to
+# the time it was last played, which is all the ordering needs. Playtime
+# is Steam's to report - see Get-SteamPlaytime. Only touched while the
+# feature is enabled.
 $recentFile = Join-Path $script:dataDir 'recent.json'
 $recentMap = @{}
 if (Test-Path $recentFile) {
@@ -1085,13 +1160,9 @@ if (Test-Path $recentFile) {
 function Save-RecentMap {
     try { [pscustomobject]$script:recentMap | ConvertTo-Json | Set-Content $script:recentFile -Encoding utf8 } catch {}
 }
-function Record-Play($game, [double]$mins) {
-    $k = [string]$game.AppId
-    $prevMins = 0.0
-    if ($script:recentMap[$k]) { try { $prevMins = [double]$script:recentMap[$k].Mins } catch {} }
-    $script:recentMap[$k] = [pscustomobject]@{
+function Record-Play($game) {
+    $script:recentMap[[string]$game.AppId] = [pscustomobject]@{
         Last = [DateTime]::Now.ToString('s')
-        Mins = [Math]::Round($prevMins + [Math]::Max(0, $mins), 1)
     }
     Save-RecentMap
 }
@@ -1128,6 +1199,22 @@ function Record-VideoPlay([string]$path) {
     $prev = 0
     if ($script:watchMap[$k]) { try { $prev = [int]$script:watchMap[$k].Plays } catch {} }
     $script:watchMap[$k] = [pscustomobject]@{ Plays = $prev + 1; Last = [DateTime]::Now.ToString('s') }
+    Save-WatchMap
+}
+# Set a count outright, for the item menu. Zero drops the entry rather than
+# storing a 0: an absent key and "watched no times" are the same thing, and
+# keeping the row would leave the file growing with nothing in it. The
+# original Last is preserved - correcting a count is not watching it again.
+function Set-VideoPlays([string]$path, [int]$n) {
+    $k = $path.ToLower()
+    if ($n -le 0) {
+        $script:watchMap.Remove($k)
+    } else {
+        $last = ''
+        if ($script:watchMap[$k]) { try { $last = [string]$script:watchMap[$k].Last } catch {} }
+        if (-not $last) { $last = [DateTime]::Now.ToString('s') }
+        $script:watchMap[$k] = [pscustomobject]@{ Plays = $n; Last = $last }
+    }
     Save-WatchMap
 }
 # VLC stores resume positions in [RecentsMRL] of vlc-qt-interface.ini:
@@ -1499,6 +1586,8 @@ function Get-GameSettingsItems {
                                 Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Recent'
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Playtime'
+                                Name = ('Steam playtime tag'.PadRight(30) + $(if ($script:playtimeEnabled) { 'on' } else { 'off' })) }
     return $list
 }
 
@@ -1740,12 +1829,12 @@ function Draw-GameLine([int]$i) {
         $tdp = Get-GameTdp $items[$i]
         if ($items[$i].MaProfile) { $label += "  [MA profile]" }
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
-        if ($script:recentEnabled) {
-            $rp = $script:recentMap[[string]$items[$i].AppId]
-            if ($rp) {
-                $m = 0.0; try { $m = [double]$rp.Mins } catch {}
-                if ($m -ge 60) { $label += "  [$([int]($m / 60))h]" }
-            }
+        # Steam's own lifetime playtime, and only for real Steam games -
+        # a non-Steam shortcut has none on record, so it gets no tag rather
+        # than a number that would mean something different on every row.
+        if ($script:playtimeEnabled -and $items[$i].Steam) {
+            $mins = [int](Get-SteamPlaytime)[[string]$items[$i].AppId]
+            if ($mins -ge 60) { $label += "  [$([Math]::Floor($mins / 60))h]" }
         }
     } elseif ($type -eq 'Files' -and $items[$i].Type -eq 'File') {
         # A CURRENTLY WATCHING row is the resume position, so it carries the
@@ -1855,9 +1944,11 @@ function Draw-All {
     }
     Write-At 15 1 $count $theme.Info
     $help = if ($cur.Type -eq 'Settings') { Hint '[ {Move}    {Tab}    {A}: change    {B}: quit ]' }
-            elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { Hint '[ {Move}    {Tab}    {A}: launch    {RB}: TDP    {B}: quit ]' }
-            else { Hint '[ {Move}    {Tab}    {A}: launch    {B}: quit ]' }
-    Write-At 15 3 $help $theme.Hint
+            elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { Hint '[ {Move}    {A}: launch    {RB}: TDP    {Y}: options    {B}: quit ]' }
+            else { Hint '[ {Move}    {Tab}    {A}: launch    {Y}: options    {B}: quit ]' }
+    # Clipped to the line: unpadded it WRAPS on a narrow window, and the
+    # wrapped tail lands on the first list row.
+    Write-At 15 3 (Pad $help ($W - 16)) $theme.Hint
     Draw-Status
     if ($items.Count -eq 0) {
         $msg = if ($cur.Type -eq 'Shortcuts') { 'No .lnk shortcuts in this folder - press A to choose another folder or remove this tab.' }
@@ -1965,7 +2056,9 @@ $PAD_BUTTONS = @(
     @{ Mask = 0x0008; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # d-pad/stick right
     @{ Mask = 0x1000; Key = [ConsoleKey]::Enter;      Repeat = $false }   # A = launch/open
     @{ Mask = 0x2000; Key = [ConsoleKey]::Escape;     Repeat = $false }   # B = back/quit
-    @{ Mask = 0x8000; Key = [ConsoleKey]::RightArrow; Repeat = $false }   # Y = next tab
+    # Y used to be a second "next tab", which the d-pad and stick already
+    # do either way - it is the item menu now, matching the M key.
+    @{ Mask = 0x8000; Key = [ConsoleKey]::M;          Repeat = $false }   # Y = item menu
     @{ Mask = 0x0200; Key = [ConsoleKey]::F5;         Repeat = $false }   # RB = cycle TDP
     @{ Mask = 0x0100; Key = [ConsoleKey]::PageDown;   Repeat = $true  }   # LB = jump a page
 )
@@ -2088,7 +2181,11 @@ function Read-MouseEvent {
             # or 2 for the double-click repeat - already down, so no edge)
             $press   = -not $isMove -and $leftNow -and -not $script:mouseLeftWas
             $script:mouseLeftWas = $leftNow
-            if ($press) { $script:hoverMuted = $false }   # a click is the mouse taking over
+            # Right button, same press-edge rule: it opens the item menu.
+            $rightNow   = [bool]($r.Btn -band 2)
+            $rightPress = -not $isMove -and $rightNow -and -not $script:mouseRightWas
+            $script:mouseRightWas = $rightNow
+            if ($press -or $rightPress) { $script:hoverMuted = $false }   # a click is the mouse taking over
             if ($isMove) {
                 # Same cell as last time = the pointer hasn't really gone
                 # anywhere: sub-cell wobble, or conhost re-reporting a
@@ -2123,6 +2220,13 @@ function Read-MouseEvent {
             }
             if ($isMove) {   # movement: hover-select the row under the cursor
                 Select-RowAt $r.Y | Out-Null
+                continue
+            }
+            # Right-click acts on the row it lands on, so it selects that row
+            # first - the menu that opens is always about the row you pointed
+            # at, not wherever the cursor happened to be.
+            if ($rightPress) {
+                if ($r.Y -ne 0 -and (Select-RowAt $r.Y) -ge 0) { return 'MenuKey' }
                 continue
             }
             if (-not $press) { continue }
@@ -2651,6 +2755,13 @@ function Invoke-SettingsAction([string]$key) {
             Save-Settings
             Build-Tabs   # apply or undo the recent-first sorting
         }
+        'Playtime' {
+            $script:playtimeEnabled = -not $script:playtimeEnabled
+            $settings['Playtime'] = $script:playtimeEnabled
+            Save-Settings
+            # The tag is stamped by Draw-GameLine every frame, so there is
+            # no tab to rebuild - the next paint already has it right.
+        }
         'VideoPlayer' {
             if (-not $script:playerHost) {
                 # Nothing to switch to: say what's missing rather than
@@ -2732,6 +2843,110 @@ function Show-SettingsGroup([string]$title, [scriptblock]$build) {
             'Q'         { return }
         }
     }
+}
+
+# ------------------------------------------------------- Item menu ---
+# Y on the pad, M (or the keyboard's own Menu key) and right-click all open
+# this: what can be done to the row under the cursor. The options are built
+# from the row itself, so nothing dead is ever offered - a video with no
+# resume position has no "reset position" line at all.
+function Show-ItemMenu {
+    if ($script:items.Count -eq 0) { return }
+    $it = $script:items[$script:selected]
+    if (-not $it -or $it.Unselectable) { return }
+    # Rows with nothing to offer - a folder, a settings row - do nothing at
+    # all. A menu that exists only to say "no options here" is worse than
+    # the button appearing to be idle on that row.
+    $type = $tabs[$script:tab].Type
+    if ($type -in 'Steam', 'Shortcuts')                 { Show-GameMenu $it }
+    elseif ($type -eq 'Files' -and $it.Type -eq 'File') { Show-VideoMenu $it }
+}
+
+function Show-GameMenu($g) {
+    # Uninstalling is Steam's business: a non-Steam shortcut is just a path
+    # Steam was told about, so there is nothing to remove and nothing to
+    # say about it - Y is simply inert on those rows.
+    if (-not $g.Steam) { return }
+    $c = Pick-Option "$([string]$g.Name)".ToUpper() @('Uninstall this game', 'Cancel')
+    if ($c -ne 0) { Draw-All; return }
+    # Steam runs the uninstall and asks for confirmation itself, so there is
+    # no second "are you sure?" here - but its dialog would open behind a
+    # maximised menu, so get out of the way first and watch for the install
+    # record to disappear. Coming back to the menu ends the wait early, which
+    # is what cancelling in Steam looks like from out here.
+    $manifest = Get-AppManifestPath ([string]$g.AppId)
+    Hide-MenuWindow
+    Start-Process "steam://uninstall/$($g.AppId)"
+    $gone = $false
+    $until = [Environment]::TickCount + 180000
+    while ([Environment]::TickCount -lt $until) {
+        Start-Sleep -Milliseconds 400
+        if ($manifest -and -not (Test-Path $manifest)) { $gone = $true; break }
+        if ($script:conHwnd -ne [IntPtr]::Zero -and
+            [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
+    }
+    Show-MenuWindow
+    try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
+    Add-MaProfileTags $games
+    $script:steamPlaytime = $null   # an uninstall leaves the playtime behind; re-read anyway
+    Build-Tabs
+    $script:items = @(Get-TabItems $script:tab)
+    $script:selected = [Math]::Min($script:selected, [Math]::Max(0, $script:items.Count - 1))
+    Snap-Selection
+    Snap-Viewport
+    Draw-All
+    if ($gone) { Show-Notice "$($g.Name) uninstalled." }
+    else       { Show-Notice "$($g.Name) is still installed - the uninstall wasn't finished." }
+}
+
+# Stays open after each change so a count can be nudged more than once, and
+# rebuilds its own rows every pass to show the new figure in place.
+function Show-VideoMenu($v) {
+    $path = [string]$v.Path
+    $k = $path.ToLower()
+    $changed = $false
+    while ($true) {
+        $plays = 0
+        if ($script:watchMap[$k]) { try { $plays = [int]$script:watchMap[$k].Plays } catch {} }
+        $resume = 0
+        foreach ($e in (Get-ResumeEntries)) {
+            if ($e.Path.ToLower() -eq $k) { $resume = [int]$e.Seconds; break }
+        }
+        $opts = @('Play count + 1'); $acts = @('inc')
+        if ($plays -gt 0) {
+            $opts += 'Play count - 1';        $acts += 'dec'
+            $opts += 'Reset play count to 0'; $acts += 'zero'
+        }
+        if ($resume -gt 0) {
+            $ts = [TimeSpan]::FromSeconds($resume)
+            $pos = if ($ts.Hours -gt 0) { $ts.ToString('h\:mm\:ss') } else { $ts.ToString('m\:ss') }
+            $opts += "Reset play position  (stopped at $pos)"; $acts += 'pos'
+        }
+        $opts += 'Done'; $acts += 'done'
+        $c = Pick-Option "$([string]$v.Name)  --  played $plays" $opts
+        if ($c -lt 0 -or $acts[$c] -eq 'done') { break }
+        switch ($acts[$c]) {
+            'inc'  { Set-VideoPlays $path ($plays + 1) }
+            'dec'  { Set-VideoPlays $path ($plays - 1) }
+            'zero' { Set-VideoPlays $path 0 }
+            # 0 seconds is the "watched to the end" tombstone, which is
+            # exactly what clearing a position means: it also shadows the
+            # stale row VLC may still be holding for this file.
+            'pos'  { Set-Resume $path 0 }
+        }
+        $changed = $true
+    }
+    if ($changed) {
+        # Tags and the CURRENTLY WATCHING section both move: a cleared
+        # position drops the video out of that section, shifting every row.
+        $t = $tabs[$script:tab]
+        $t.Items = @(Get-FileItems $t)
+        $script:items = $t.Items
+        $script:selected = [Math]::Min($script:selected, [Math]::Max(0, $script:items.Count - 1))
+        Snap-Selection
+        Snap-Viewport
+    }
+    Draw-All
 }
 
 # SETTINGS actions on a configured tab: rename, reorder, retarget, remove.
@@ -3560,8 +3775,11 @@ try {
                     $landedAt = [DateTime]::Now
                 }
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
+                # Steam has just written a fresh playtime for this game (or
+                # is about to), so the cached figures are stale.
+                $script:steamPlaytime = $null
                 if ($script:recentEnabled) {
-                    Record-Play $g (([DateTime]::Now - $t0).TotalMinutes)
+                    Record-Play $g
                     # bubble the just-played game to the top of every game tab
                     foreach ($gt in $tabs) {
                         if ($gt.Type -in 'Steam', 'Shortcuts') { $gt.Items = @(Sort-Games $gt.Items) }
@@ -3598,6 +3816,9 @@ try {
                     }
                 }
             }
+            # Y on the pad arrives as M; 'MenuKey' is a right-click, and
+            # Applications is the keyboard's own context-menu key.
+            { "$_" -in 'M', 'Applications', 'MenuKey' } { Show-ItemMenu }
             'Escape'    {   # in a file-tab subfolder: go up a level; otherwise quit
                 if ($cur.Type -eq 'Files' -and (Exit-FileDir $cur)) { break }
                 Clear-Host; exit 0
