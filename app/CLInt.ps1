@@ -666,8 +666,17 @@ try {
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
+    # Hosts other than conhost (Windows Terminal above all) hand back a
+    # hidden pseudo-console window here, which is no use for ordering or
+    # focus. The process's own main window is the one on screen - it is
+    # what clint.hwnd records for the hotkey already.
+    if ($script:conHwnd -eq [IntPtr]::Zero) {
+        try { $script:conHwnd = (Get-Process -Id $PID).MainWindowHandle } catch {}
+    }
 } catch {}
 
 # Is the console genuinely off-screen? Losing the foreground is NOT
@@ -719,6 +728,69 @@ function Show-MenuWindow {
     }
     # AppActivate by OWN PID, never by title - other consoles can share it.
     try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
+}
+
+# Pin the menu above everything else, or let it back down again.
+#
+# Handing the Steam client a command means running steam.exe, and that
+# raises its window - the URL protocol is the only way to talk to a running
+# Steam without doing so, and it has nothing for uninstalling. Steam still
+# comes up, but behind a topmost menu, so the user never sees it: no flash
+# of the store, no wondering what just happened. NOACTIVATE, so this alone
+# never moves the focus around.
+function Set-MenuTopmost([bool]$on) {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    try {
+        $after = if ($on) { [IntPtr](-1) } else { [IntPtr](-2) }   # HWND_TOPMOST / HWND_NOTOPMOST
+        # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        [CLIntFocus.Win]::SetWindowPos($script:conHwnd, $after, 0, 0, 0, 0, 0x0013) | Out-Null
+    } catch {}
+}
+
+# Steam's on-screen window belongs to steamwebhelper, not steam.exe, and
+# only one of the several helper processes owns it - which is why looking
+# for it on the 'steam' process finds nothing. Recorded before we hand the
+# client a command so that a Steam the user already had open is left alone;
+# only a window that appears because of us gets put away again.
+function Get-SteamWindows {
+    $set = @{}
+    try {
+        foreach ($p in (Get-Process -Name 'steamwebhelper', 'steam' -ErrorAction SilentlyContinue)) {
+            try {
+                $p.Refresh()
+                $w = $p.MainWindowHandle
+                if ($w -ne [IntPtr]::Zero -and [CLIntFocus.Win]::IsWindowVisible($w)) { $set[[int64]$w] = $true }
+            } catch {}
+        }
+    } catch {}
+    return $set
+}
+# Put back exactly what was not there before. Hiding is what Steam itself
+# does when closed to the tray, so a client that was in the tray goes back
+# to the tray rather than being left minimised on the taskbar. Every window
+# put away is remembered, because one of them may turn out to be a question
+# for the user rather than a window Steam merely felt like showing.
+$script:steamHidden = @{}
+function Hide-NewSteamWindows($before) {
+    try {
+        foreach ($w in (Get-SteamWindows).Keys) {
+            if (-not $before[$w]) {
+                try {
+                    [CLIntFocus.Win]::ShowWindow([IntPtr]$w, 0) | Out-Null   # SW_HIDE
+                    $script:steamHidden[$w] = $true
+                } catch {}
+            }
+        }
+    } catch {}
+}
+# Hand back everything we hid. Used the moment it turns out this client
+# wants an answer after all: its dialog must not be sitting hidden because
+# we tidied it away a second earlier.
+function Restore-HiddenSteamWindows {
+    foreach ($w in @($script:steamHidden.Keys)) {
+        try { [CLIntFocus.Win]::ShowWindow([IntPtr]$w, 5) | Out-Null } catch {}   # SW_SHOW
+    }
+    $script:steamHidden = @{}
 }
 
 # Get out of the way of a window that is about to open behind us. Steam's
@@ -2862,30 +2934,95 @@ function Show-ItemMenu {
     elseif ($type -eq 'Files' -and $it.Type -eq 'File') { Show-VideoMenu $it }
 }
 
+# Watch an install record disappear, which is how an uninstall is known to
+# have gone through. $StopOnFocus is for the hidden wait: the menu coming
+# back to the front means the user has finished with Steam one way or the
+# other, and usually means they cancelled.
+function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bool]$keepFront = $false,
+                          $hideSteamAfter = $null) {
+    if (-not $manifest) { return $false }   # never found it: nothing to watch
+    $until = [Environment]::TickCount + $ms
+    $grabs = 0
+    while ([Environment]::TickCount -lt $until) {
+        Start-Sleep -Milliseconds 200
+        # Whatever Steam has just put on screen goes away again the moment
+        # it appears, so it is never left sitting in front of the menu.
+        if ($null -ne $hideSteamAfter) { Hide-NewSteamWindows $hideSteamAfter }
+        if (-not (Test-Path $manifest)) { return $true }
+        # No console handle means we can neither tell where the focus is nor
+        # ask for it back - not the same thing as being in the background.
+        $haveHwnd = ($script:conHwnd -ne [IntPtr]::Zero)
+        $isFront  = ($haveHwnd -and [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd)
+        if ($stopOnFocus -and $isFront) { return $false }
+        # Handing Steam a command brings its window up whether or not it has
+        # anything to show. Take the front back - the user asked CLInt to do
+        # this and should still be looking at CLInt when it finishes. Capped,
+        # so a deliberate alt-tab away isn't fought over for the whole wait.
+        if ($keepFront -and $haveHwnd -and -not $isFront -and $grabs -lt 5) {
+            Show-MenuWindow
+            $grabs++
+        }
+    }
+    return $false
+}
+
 function Show-GameMenu($g) {
     # Uninstalling is Steam's business: a non-Steam shortcut is just a path
     # Steam was told about, so there is nothing to remove and nothing to
     # say about it - Y is simply inert on those rows.
     if (-not $g.Steam) { return }
-    $c = Pick-Option "$([string]$g.Name)".ToUpper() @('Uninstall this game', 'Cancel')
+    $name = "$([string]$g.Name)".ToUpper()
+    $c = Pick-Option $name @('Uninstall this game', 'Cancel')
     if ($c -ne 0) { Draw-All; return }
-    # Steam runs the uninstall and asks for confirmation itself, so there is
-    # no second "are you sure?" here - but its dialog would open behind a
-    # maximised menu, so get out of the way first and watch for the install
-    # record to disappear. Coming back to the menu ends the wait early, which
-    # is what cancelling in Steam looks like from out here.
+    # Our own confirmation, driven by the d-pad like everything else here.
+    # It is not a formality: app_uninstall below removes the game outright
+    # without asking, so this prompt is the only thing in front of it.
+    $sure = Pick-Option "UNINSTALL $name  --  ARE YOU SURE?" @('Yes - uninstall it', 'Cancel')
+    if ($sure -ne 0) { Draw-All; return }
+    Draw-All
+    Show-Notice "Uninstalling $($g.Name)..."
     $manifest = Get-AppManifestPath ([string]$g.AppId)
-    Hide-MenuWindow
-    Start-Process "steam://uninstall/$($g.AppId)"
+
+    # steam://uninstall always raises Steam's own confirmation, which wants a
+    # mouse. The client's console command does the same job with no dialog at
+    # all, and the client takes console commands as +arguments - so that is
+    # the one we ask for, having just done the asking ourselves.
+    # -silent asks the client not to put its window up; the topmost pin is
+    # what actually guarantees it, since a forwarded command raises Steam
+    # regardless. Both, so the common case never even flickers.
     $gone = $false
-    $until = [Environment]::TickCount + 180000
-    while ([Environment]::TickCount -lt $until) {
-        Start-Sleep -Milliseconds 400
-        if ($manifest -and -not (Test-Path $manifest)) { $gone = $true; break }
-        if ($script:conHwnd -ne [IntPtr]::Zero -and
-            [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
+    $steamBefore = Get-SteamWindows   # anything already open is not ours to touch
+    $script:steamHidden = @{}
+    Set-MenuTopmost $true
+    try {
+        $fired = $false
+        try {
+            $exe = Join-Path (Get-SteamPath) 'steam.exe'
+            if (Test-Path $exe) {
+                Start-Process $exe -ArgumentList '-silent', '+app_uninstall', ([string]$g.AppId)
+                $fired = $true
+            }
+        } catch {}
+        if (-not $fired) { Start-Process "steam://uninstall/$($g.AppId)" }
+        # A silent removal lands in a moment, so wait a little with the menu
+        # still up and in front. Focus is taken back as well as the z-order:
+        # Steam can hold the keyboard from behind, which would leave the menu
+        # looking right but ignoring the pad.
+        $gone = Wait-ForUninstall $manifest 12000 -keepFront $true -hideSteamAfter $steamBefore
+    } finally {
+        Set-MenuTopmost $false        # never leave the console pinned over the desktop
+        Hide-NewSteamWindows $steamBefore   # and never leave Steam's window behind either
     }
-    Show-MenuWindow
+    # Still here: this client wouldn't take the command and has put its own
+    # dialog up instead. That one needs answering, so stop covering it and
+    # get out of the way. The URL is NOT fired as well - that would be a
+    # second prompt stacked on the first.
+    if (-not $gone -and $manifest) {
+        Restore-HiddenSteamWindows   # whatever it wants answering, put it back on screen
+        Hide-MenuWindow
+        $gone = Wait-ForUninstall $manifest 180000 -stopOnFocus $true
+    }
+    Show-MenuWindow   # however it went, the user ends up back here
     try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
     Add-MaProfileTags $games
     $script:steamPlaytime = $null   # an uninstall leaves the playtime behind; re-read anyway

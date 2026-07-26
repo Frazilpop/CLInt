@@ -94,21 +94,12 @@ Mouse can be turned off, if required, under: **SETTINGS → Mouse support**.
 
 ## Item options
 
-**Y** on the controller, **M** (or the keyboard's own menu key) and
-**right-click** all open a short menu of things you can do to whatever is
-highlighted. It only ever lists what actually applies to that row.
+**Y**, **M** on the keyboard, or **right-click** opens a short menu for
+whatever is highlighted.
 
-For a Steam game that is **Uninstall**, which hands over to Steam's own
-confirmation — CLInt steps out of the way so the prompt isn't hidden
-behind the menu, then refreshes the library once you're done.
-
-Rows with nothing to offer — a non-Steam shortcut, a folder, a settings
-row — do nothing at all when you press it.
-
-For a video it is the play count — **+1**, **-1**, or **reset to 0** — and,
-when you stopped partway through something, **reset play position**, which
-clears the resume marker and drops it out of CURRENTLY WATCHING. The menu
-stays open while you adjust, so a count can be nudged more than once.
+Steam games can be uninstalled from here, without leaving CLInt. Videos get
+their play count changed — up, down, or back to zero — and a part-watched
+one can have its resume position cleared.
 
 ## HotKey
 
