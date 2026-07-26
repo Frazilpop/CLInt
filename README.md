@@ -19,7 +19,9 @@ A minimalist interface with configurable tabs to load the following:
   too.
 - **LOCAL GAMES** — launches `.lnk` shortcuts from a configurable folder,
   tracking the game by its target exe.
-- **VIDEOS** — a folder browser that plays video files. VLC reccomended for play count tracking and auto resume. Other players supported too.
+- **VIDEOS** — a folder browser that plays video files, in CLInt's own
+  player or whatever you normally use. Half-watched videos are remembered
+  and rise to the top.
 - **SETTINGS** — deep app customisation,
   persisted to `data\settings.json`.
   
@@ -57,13 +59,34 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   
   This feature is auto-detected and hidden if Motion Assistant is not installed.
 
+## Video player
+
+Videos open in your usual player unless you switch to CLInt's own under
+**SETTINGS → Video settings → Video player**.
+
+The built-in one needs VLC installed — it plays through VLC's engine
+without ever opening the VLC window. No VLC and that row says so, and
+videos keep opening the way they do now. Nothing else to install.
+
+Fullscreen and controller-driven: A pauses, B returns to CLInt, the D-pad
+seeks and sets volume (up to 150%), X cycles subtitles, Y audio tracks,
+and LB/RB step through the folder's other episodes. It remembers where you
+stopped.
+
+Subtitles start off. **SETTINGS → Video settings → Subtitles on by
+default** turns them on, and works both for an `.srt` sitting beside the
+video and for tracks built into the file itself. X switches between them
+either way.
+
 ## Controls
 
 D-pad or left stick up/down to move, left/right (or Y) to switch tabs,
 A/Enter to launch, B to go back/quit, RB to cycle TDP for the
 highlighted game.
 
-The controller is read natively via XInput. Keyboard works too.
+The controller is read natively via XInput. Keyboard works too — the
+on-screen prompts name gamepad buttons, and **SETTINGS → Button hints**
+switches them to keyboard keys.
 
 The mouse works as well: hover to highlight, click to launch, click a
 tab name to switch to it. Mouse can be turned off, if required, under:

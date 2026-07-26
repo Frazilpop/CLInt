@@ -981,11 +981,79 @@ function Set-ThemeColors {
     } catch {}
 }
 
+# --- Handing the theme to the built-in player ---------------------------
+# The player draws CLInt's look on a WinForms window, so it needs RGB where
+# everything here uses colour NAMES. Resolve each one exactly the way the
+# screen resolves it - this theme's palette override if it has one, else
+# whatever this console's table actually holds - and the overlay comes out
+# the colour the menu was a second earlier, on this machine, including the
+# two themes that repaint their own background.
+#
+# Only reached if the console API is unavailable and the theme has no
+# opinion: Campbell, conhost's default scheme since 2017.
+$stockRgb = @{
+    Black = 0x0C0C0C; DarkBlue = 0x0037DA; DarkGreen = 0x13A10E; DarkCyan = 0x3A96DD
+    DarkRed = 0xC50F1F; DarkMagenta = 0x881798; DarkYellow = 0xC19C00; Gray = 0xCCCCCC
+    DarkGray = 0x767676; Blue = 0x3B78FF; Green = 0x16C60C; Cyan = 0x61D6D6
+    Red = 0xE74856; Magenta = 0xB4009E; Yellow = 0xF9F1A5; White = 0xF2F2F2
+}
+function Get-ColorRgb([string]$name) {
+    if ($script:theme.Palette -and $script:theme.Palette.ContainsKey($name)) {
+        return [int]$script:theme.Palette[$name]
+    }
+    if ($script:origPalette) {
+        try {
+            # COLORREF 0x00BBGGRR -> 0xRRGGBB, the reverse of Set-ConsolePalette
+            $c = [int]$script:origPalette[[int][System.ConsoleColor]$name]
+            return [int]((($c -band 0xFF) -shl 16) -bor ($c -band 0xFF00) -bor (($c -shr 16) -band 0xFF))
+        } catch {}
+    }
+    if ($script:stockRgb.ContainsKey($name)) { return [int]$script:stockRgb[$name] }
+    return 0xCCCCCC
+}
+
+# Role=RRGGBB pairs for Player.ps1's -Theme. No spaces, so it travels as a
+# single argument without quoting.
+function Get-ThemeRgbArg {
+    $roles = @('Bg', 'Accent', 'Logo', 'Info', 'Hint', 'Text', 'Bright', 'Notice')
+    return (($roles | ForEach-Object { '{0}={1:X6}' -f $_, (Get-ColorRgb $script:theme[$_]) }) -join ',')
+}
+
 # Text size (SETTINGS): font heights in scaled pixels, so the visual size
 # follows the user's display scale like every other app. Medium is the
 # 28px the app has always used.
 $textSizes = [ordered]@{ small = 20; medium = 28; large = 34 }
 $textSizeName = if ($settings['TextSize'] -and $textSizes.Contains([string]$settings['TextSize'])) { [string]$settings['TextSize'] } else { 'medium' }
+
+# --- Button hints (SETTINGS) --------------------------------------------
+# Which buttons the on-screen hint rows name. CLInt is built to be driven
+# from the couch, so the gamepad set is the default - but every one of these
+# rows is also the only place the keyboard equivalents are written down, and
+# at a desk the controller names are noise. One setting covers every hint in
+# the app, the built-in player's row included, which is why the choice
+# travels to Player.ps1 on its command line.
+#
+# Only the button NAMES move between the two sets; the verb after them
+# ("launch", "cancel") is the same either way. That keeps each hint one
+# string with tokens in it rather than two strings that drift apart the
+# first time someone edits one and forgets the other.
+#
+# The names are the real bindings, checked against the input handlers:
+# Enter launches, Esc goes back, the arrows move AND switch tabs, and F5 is
+# what the gamepad's RB arrives as.
+$hintWords = @{
+    gamepad  = @{ Move = 'D-pad: move';  Tab = '</>: switch tab'; A = 'A';     B = 'B'
+                  RB   = 'RB';           EnterA = 'Enter/A';      EscB = 'Esc/B' }
+    keyboard = @{ Move = 'Arrows: move'; Tab = 'Left/Right: tab'; A = 'Enter'; B = 'Esc'
+                  RB   = 'F5';           EnterA = 'Enter';        EscB = 'Esc' }
+}
+$controlHints = if ([string]$settings['ButtonHints'] -eq 'keyboard') { 'keyboard' } else { 'gamepad' }
+
+function Hint([string]$s) {
+    $w = $script:hintWords[$script:controlHints]
+    foreach ($k in $w.Keys) { $s = $s.Replace('{' + $k + '}', $w[$k]) }
+    return $s
+}
 
 # Behaviour toggles (all in SETTINGS). Clock/battery/recently-played
 # default on; the launch-time update check is opt-in.
@@ -1034,6 +1102,16 @@ function Record-Play($game, [double]$mins) {
 # same VLC state, so it stands on its own with video history switched off.
 $videoHistEnabled = $settings['VideoHistory']     -ne $false
 $watchingEnabled  = $settings['CurrentlyWatching'] -ne $false
+# The built-in player's bottom row of button hints. On by default - the
+# player takes a controller and nothing else says what the buttons do -
+# but once they are known they are just a row of text over the film, so
+# turning them off shortens the overlay by exactly that row.
+$playerHints      = $settings['PlayerHints']       -ne $false
+# Whether the built-in player starts a file with subtitles showing. Off
+# unless asked for - a file carrying a subtitle track is not a reason to
+# put it on screen - and note the default is the opposite way round to the
+# toggles above, so this one tests for $true rather than -ne $false.
+$subtitlesOn      = $settings['Subtitles']         -eq $true
 $watchFile = Join-Path $script:dataDir 'watch-history.json'
 $watchMap = @{}
 if (Test-Path $watchFile) {
@@ -1091,6 +1169,55 @@ function Get-VlcResumeSeconds {
     return $map
 }
 
+# The built-in player has no vlc-qt-interface.ini to write into, so it
+# reports where it stopped and CLInt keeps that here - the same shape of
+# data VLC keeps, under our own roof. A Seconds of 0 is not an absence: it
+# is a tombstone saying "watched to the end", and it exists to shadow the
+# stale row VLC may still be holding for a file the built-in player has
+# since finished. Without it, a video would climb back into CURRENTLY
+# WATCHING on the strength of a position nothing has used for weeks.
+$resumeFile = Join-Path $script:dataDir 'resume.json'
+$resumeMap = @{}
+if (Test-Path $resumeFile) {
+    try {
+        (Get-Content $resumeFile -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $resumeMap[$_.Name] = $_.Value }
+    } catch {}
+}
+function Save-ResumeMap {
+    try { [pscustomobject]$script:resumeMap | ConvertTo-Json | Set-Content $script:resumeFile -Encoding utf8 } catch {}
+}
+function Set-Resume([string]$path, [int]$seconds, [string]$last) {
+    if (-not $last) { $last = [DateTime]::Now.ToString('s') }
+    $script:resumeMap[$path.ToLower()] = [pscustomobject]@{
+        Path = $path; Seconds = [Math]::Max(0, $seconds); Last = $last
+    }
+    Save-ResumeMap
+}
+
+# Both stores, as one list, most-recently-touched first. Ours goes first and
+# wins outright on any path it mentions: it is the only one of the two that
+# is written the moment playback stops.
+function Get-ResumeEntries {
+    $out = @(); $seen = @{}
+    $ours = @($script:resumeMap.Keys | Sort-Object {
+        try { [DateTime]$script:resumeMap[$_].Last } catch { [DateTime]::MinValue }
+    } -Descending)
+    foreach ($k in $ours) {
+        $seen[$k] = $true
+        $sec = 0
+        try { $sec = [int]$script:resumeMap[$k].Seconds } catch {}
+        if ($sec -le 0) { continue }   # tombstone: claimed, but nothing to resume
+        $p = [string]$script:resumeMap[$k].Path
+        if ($p) { $out += [pscustomobject]@{ Path = $p; Seconds = $sec } }
+    }
+    foreach ($e in (Get-VlcResumeEntries)) {
+        if ($seen[$e.Path.ToLower()]) { continue }
+        $out += $e
+    }
+    return @($out)
+}
+
 # Recently played games sit in their own titled section at the top (most
 # recent first), with a gap before the A-Z list so the split is obvious.
 # The title/spacer rows carry Unselectable = $true: the cursor slides past
@@ -1142,17 +1269,59 @@ function Find-Vlc {
     return $null
 }
 $vlcExe     = Find-Vlc
+$vlcDir     = if ($vlcExe) { Split-Path $vlcExe -Parent } else { $null }
 $videoExtRe = '^\.(mp4|mkv|avi|webm|mov|m4v|wmv|mpg|mpeg|ts|flv)$'
+
+# The built-in player (SETTINGS) plays through the libvlc inside that same
+# VLC install, in a process of its own. Which PowerShell launches it is not
+# a preference: a 32-bit libvlc cannot be loaded into 64-bit PowerShell, or
+# the other way round, and VLC ships in both flavours. So read the machine
+# type out of the DLL's PE header and hand the job to the host that matches.
+# No VLC, or a header we can't read, means no built-in player - the setting
+# says so rather than offering a mode that would fail at the first press.
+function Get-PlayerHost([string]$dir) {
+    if (-not $dir) { return $null }
+    $dll = Join-Path $dir 'libvlc.dll'
+    if (-not (Test-Path $dll)) { return $null }
+    $machine = 0
+    try {
+        $fs = [IO.File]::OpenRead($dll)
+        try {
+            $br = New-Object IO.BinaryReader($fs)
+            $fs.Position = 0x3C
+            $fs.Position = $br.ReadInt32() + 4   # e_lfanew -> PE signature, then COFF header
+            $machine = $br.ReadUInt16()
+        } finally { $fs.Close() }
+    } catch { return $null }
+    # System32 is whatever bitness the CALLING process is, so a 32-bit CLInt
+    # asking for the 64-bit host has to go via Sysnative to dodge the
+    # file-system redirector.
+    $native = if ([Environment]::Is64BitProcess -or -not [Environment]::Is64BitOperatingSystem) { 'System32' } else { 'Sysnative' }
+    $path = switch ($machine) {
+        0x8664  { Join-Path $env:SystemRoot "$native\WindowsPowerShell\v1.0\powershell.exe" }   # x64
+        0x014C  { Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe' }  # x86
+        default { $null }                                                                       # arm64 etc: not ours to guess
+    }
+    if ($path -and (Test-Path $path)) { return $path }
+    return $null
+}
+$playerHost = Get-PlayerHost $vlcDir
+# Default off: an upgrade should not silently change how videos open. The
+# SETTINGS row turns it on, and stays out of the way when there's no engine.
+$builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -eq 'builtin')
 
 # Videos VLC still holds a resume position for get a CURRENTLY WATCHING
 # section at the top of the tab's ROOT listing - the games tabs' RECENTLY
 # PLAYED idea, applied to what is half-watched rather than what was opened
 # last. Subfolders are included: a part-watched episode buried three levels
-# down is the one thing you want one keypress away, so it shows by its path
-# relative to the root. Only at the root, though - inside a subfolder the
-# listing is the plain browser again, or the same video would follow you
-# around. VLC drops a file from this list the moment it plays to the end,
-# so the section empties itself with no bookkeeping of ours.
+# down is the one thing you want one keypress away, and it is listed by file
+# name alone. The folders above it are how it was FOUND, not what it is -
+# an episode already carries its show and number in its own name, and the
+# row then reads exactly as it does in the browser below. Only at the root,
+# though - inside a subfolder the listing is the plain browser again, or the
+# same video would follow you around. VLC drops a file from this list the
+# moment it plays to the end, so the section empties itself with no
+# bookkeeping of ours.
 function Add-WatchingSection($t, $list, $entries) {
     if (-not $script:watchingEnabled -or $entries.Count -eq 0) { return @($list) }
     if (-not $t.Root -or $t.Dir -ne $t.Root) { return @($list) }
@@ -1170,12 +1339,30 @@ function Add-WatchingSection($t, $list, $entries) {
             try { $plays = [int]$script:watchMap[$k].Plays } catch {}
         }
         $watching += [pscustomobject]@{
-            Name = $e.Path.Substring($prefix.Length); Path = $e.Path; Type = 'File'
+            Name = [System.IO.Path]::GetFileName($e.Path); Path = $e.Path; Type = 'File'
             Plays = $plays; Resume = $e.Seconds; Watching = $true
         }
         $taken[$k] = $true
     }
     if ($watching.Count -eq 0) { return @($list) }
+    # Names alone can collide - "Show\Season 1\01.mkv" and "Season 2\01.mkv"
+    # both come through as "01.mkv", and two identical rows are worse than
+    # one long one. Only the colliding rows get their folder back, so the
+    # ordinary case stays a bare file name.
+    $seen = @{}
+    foreach ($w in $watching) {
+        $n = $w.Name.ToLower()
+        $seen[$n] = 1 + [int]$seen[$n]
+    }
+    foreach ($w in $watching) {
+        if ($seen[$w.Name.ToLower()] -gt 1) {
+            # NOT Split-Path: -LiteralPath and -Parent are different parameter
+            # sets in PS 5.1 and throw together, and plain -Path would read a
+            # folder named "Season [1]" as a wildcard.
+            $parent = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($w.Path))
+            if ($parent) { $w.Name = $parent + '\' + $w.Name }
+        }
+    }
     # Lifted, not copied: a root-level video listed above must not show up
     # again in the A-Z rows below it.
     $rest = @($list | Where-Object { $_.Type -ne 'File' -or -not $taken[$_.Path.ToLower()] })
@@ -1205,7 +1392,7 @@ function Get-FileItems($t) {
         Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
-    $resumeEntries = if ($script:videoHistEnabled -or $script:watchingEnabled) { @(Get-VlcResumeEntries) } else { @() }
+    $resumeEntries = if ($script:videoHistEnabled -or $script:watchingEnabled) { @(Get-ResumeEntries) } else { @() }
     $vlcResume = @{}
     foreach ($e in $resumeEntries) { $vlcResume[$e.Path.ToLower()] = $e.Seconds }
     $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
@@ -1303,6 +1490,46 @@ $tab      = 0
 $selected = 0
 $offset   = 0    # first item index shown in the viewport
 
+# Game and video options each live on their own sub-page, reached from
+# SETTINGS. They are built here rather than inline so the sub-page can
+# rebuild its rows after every change and show the new value in place.
+function Get-GameSettingsItems {
+    $list = @()
+    $list += [pscustomobject]@{ Key = 'NonSteam'
+                                Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Recent'
+                                Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
+    return $list
+}
+
+function Get-VideoSettingsItems {
+    $list = @()
+    $list += [pscustomobject]@{ Key = 'VideoPlayer'
+                                Name = ('Video player'.PadRight(30) +
+                                        $(if ($script:builtinPlayer)  { "CLInt's own player" }
+                                          elseif ($script:playerHost) { 'default app' }
+                                          else                        { 'default app  (needs VLC for the built-in one)' })) }
+    # Only meaningful while the built-in player is the one being used, so
+    # it appears under that row rather than sitting there doing nothing.
+    if ($script:builtinPlayer) {
+        $list += [pscustomobject]@{ Key = 'PlayerHints'
+                                    Name = ('Player button hints'.PadRight(30) +
+                                            $(if ($script:playerHints) { 'on' } else { 'off' })) }
+        $list += [pscustomobject]@{ Key = 'Subtitles'
+                                    Name = ('Subtitles on by default'.PadRight(30) +
+                                            $(if ($script:subtitlesOn) { 'on' } else { 'off' })) }
+    }
+    $list += [pscustomobject]@{ Key = 'VideoHist'
+                                Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Watching'
+                                Name = ('Currently watching first'.PadRight(30) + $(if ($script:watchingEnabled) { 'on' } else { 'off' })) }
+    if (-not $script:vlcExe) {
+        $list += [pscustomobject]@{ Key = 'VlcInfo'
+                                    Name = 'VLC not detected - videos will open in the default player' }
+    }
+    return $list
+}
+
 function Get-SettingsItems {
     $list = @()
     for ($i = 0; $i -lt $settings['Tabs'].Count; $i++) {
@@ -1316,19 +1543,17 @@ function Get-SettingsItems {
                                     Name = ("Tab $($i + 1): $($tabs[$i].Name)".PadRight(30) + $desc) }
     }
     $list += [pscustomobject]@{ Key = 'AddTab'; Name = '[ + add a tab ]' }
+    # What the tabs hold gets a page each, so the list below stays about
+    # CLInt itself rather than mixing games and videos into one column.
+    $list += [pscustomobject]@{ Key = 'GameSettings'
+                                Name = ('Game settings'.PadRight(30) + 'Steam library, recently played') }
+    $list += [pscustomobject]@{ Key = 'VideoSettings'
+                                Name = ('Video settings'.PadRight(30) + 'player, history, currently watching') }
     $list += [pscustomobject]@{ Key = 'Fullscreen'; Name = 'Toggle fullscreen' }
     $list += [pscustomobject]@{ Key = 'ShowClock'
                                 Name = ('Show clock'.PadRight(30) + $(if ($script:showClock) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'ShowBattery'
                                 Name = ('Show battery'.PadRight(30) + $(if ($script:showBattery) { 'on' } else { 'off' })) }
-    $list += [pscustomobject]@{ Key = 'NonSteam'
-                                Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
-    $list += [pscustomobject]@{ Key = 'Recent'
-                                Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
-    $list += [pscustomobject]@{ Key = 'VideoHist'
-                                Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
-    $list += [pscustomobject]@{ Key = 'Watching'
-                                Name = ('Currently watching first'.PadRight(30) + $(if ($script:watchingEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'AutoCheck'
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Mouse'
@@ -1337,6 +1562,8 @@ function Get-SettingsItems {
                                 Name = ('Menu key'.PadRight(30) +
                                         $(if ($script:hotkeyReady) { Get-MenuKeySummary $script:rootDir }
                                           else { 'unavailable - re-run Install.bat' })) }
+    $list += [pscustomobject]@{ Key = 'ButtonHints'
+                                Name = ('Button hints'.PadRight(30) + $script:controlHints) }
     $list += [pscustomobject]@{ Key = 'TextSize'
                                 Name = ('Text size'.PadRight(30) + $script:textSizeName) }
     $list += [pscustomobject]@{ Key = 'Theme'
@@ -1347,10 +1574,6 @@ function Get-SettingsItems {
         $nv = ''
         try { $nv = ([string](Get-Content $marker -TotalCount 1)).Trim() } catch {}
         if ($nv) { $updName += "  ->  v$nv available" }
-    }
-    if (-not $vlcExe) {
-        $list += [pscustomobject]@{ Key = 'VlcInfo'
-                                    Name = 'VLC not detected - videos will open in the default player' }
     }
     $list += [pscustomobject]@{ Key = 'Update'; Name = $updName }
     $list += [pscustomobject]@{ Key = 'ClearHist'; Name = '[ clear history ]' }
@@ -1631,9 +1854,9 @@ function Draw-All {
         'Settings'  { 'settings are saved automatically' }
     }
     Write-At 15 1 $count $theme.Info
-    $help = if ($cur.Type -eq 'Settings') { "[ D-pad: move    </>: switch tab    A: change    B: quit ]" }
-            elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { "[ D-pad: move    </>: switch tab    A: launch    RB: TDP    B: quit ]" }
-            else { "[ D-pad: move    </>: switch tab    A: launch    B: quit ]" }
+    $help = if ($cur.Type -eq 'Settings') { Hint '[ {Move}    {Tab}    {A}: change    {B}: quit ]' }
+            elseif ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts') { Hint '[ {Move}    {Tab}    {A}: launch    {RB}: TDP    {B}: quit ]' }
+            else { Hint '[ {Move}    {Tab}    {A}: launch    {B}: quit ]' }
     Write-At 15 3 $help $theme.Hint
     Draw-Status
     if ($items.Count -eq 0) {
@@ -2077,7 +2300,7 @@ function Pick-Folder([string]$label, [string]$start) {
         }
         Write-At 2 0 (Pad "CHOOSE FOLDER  --  $label" ($W - 4)) $theme.Accent
         Write-At 2 1 (Pad ("Now: " + $(if ($dir) { $dir } else { 'select a drive' })) ($W - 4)) $theme.Info
-        Write-At 2 3 '[ D-pad: move    A: open / choose    B: up / cancel ]' $theme.Hint
+        Write-At 2 3 (Hint '[ {Move}    {A}: open / choose    {B}: up / cancel ]') $theme.Hint
         $top = 5
         $rows = [Math]::Max(1, $H - $top - 1)
         if ($sel -lt $off) { $off = $sel }
@@ -2140,7 +2363,7 @@ function Pick-Option([string]$title, [string[]]$options) {
     Get-Layout
     while ($true) {
         Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
-        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' $theme.Hint
+        Write-At 2 2 (Hint '[ {Move}    {A}: choose    {B}: cancel ]') $theme.Hint
         for ($i = 0; $i -lt $options.Count; $i++) {
             if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $options[$i] + '  ') ($W - 3)) $theme.SelFg $theme.Accent }
             else             { Write-At 1 (4 + $i) (Pad ('     ' + $options[$i] + '  ') ($W - 3)) $theme.Text }
@@ -2173,7 +2396,7 @@ function Pick-Mascot([string]$title, [string]$current) {
     Get-Layout
     while ($true) {
         Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
-        Write-At 2 2 '[ D-pad: move    A: choose    B: cancel ]' $theme.Hint
+        Write-At 2 2 (Hint '[ {Move}    {A}: choose    {B}: cancel ]') $theme.Hint
         for ($i = 0; $i -lt $entries.Count; $i++) {
             $label = $entries[$i] + $(if ($entries[$i] -eq $current) { '  (current)' } else { '' })
             if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $label + '  ') 30) $theme.SelFg $theme.Accent }
@@ -2207,7 +2430,7 @@ function Read-TextInput([string]$title, [string]$current) {
     Clear-Host
     Get-Layout
     Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
-    Write-At 2 2 '[ type on the keyboard    Enter/A: save    Esc/B: cancel    empty: automatic name ]' $theme.Hint
+    Write-At 2 2 (Hint '[ type on the keyboard    {EnterA}: save    {EscB}: cancel    empty: automatic name ]') $theme.Hint
     $text = $current
     while ($true) {
         Write-At 2 4 (Pad ('> ' + $text + '_') ($W - 4)) $theme.Bright
@@ -2295,7 +2518,7 @@ function Read-MenuKeyPress {
     Write-At 2 4 (Pad 'Hold Fn if the key needs it, and press it exactly as you normally would.' ($W - 4)) $theme.Text
     Write-At 2 5 (Pad "If nothing registers, or the wrong key is detected, go back and choose from" ($W - 4)) $theme.Text
     Write-At 2 6 (Pad "the list instead - that binds by name and ignores how your keyboard sends it." ($W - 4)) $theme.Text
-    Write-At 2 8 (Pad '[ Esc / B: cancel ]' ($W - 4)) $theme.Hint
+    Write-At 2 8 (Pad (Hint '[ {EscB}: cancel ]') ($W - 4)) $theme.Hint
     while ($true) {
         if ([Console]::KeyAvailable) {
             $k = [Console]::ReadKey($true)
@@ -2379,7 +2602,7 @@ function Configure-MenuKey {
             $rows    = @($choices | ForEach-Object { $_.Label.PadRight(20) + $_.Hint })
             $start   = [Math]::Max(0, [array]::IndexOf(@($choices | ForEach-Object { $_.Key }), $curKey))
             $pick = Pick-ScrollList 'MENU KEY  --  CHOOSE A KEY' `
-                        '[ D-pad: move    A: choose    B: cancel ]' $rows $start
+                        (Hint '[ {Move}    {A}: choose    {B}: cancel ]') $rows $start
             if ($pick -ge 0) { $chosen = $choices[$pick].Key }
         } else {
             while (-not $chosen) {
@@ -2407,6 +2630,107 @@ function Configure-MenuKey {
         $script:pendingNotice = $res.Message
         if ($res.Ok) { return }
         if ((Pick-Option "MENU KEY  --  $($res.Message)" @('Try another key', 'Leave it')) -ne 0) { return }
+    }
+}
+
+# The options that live on a sub-page. Kept apart from the SETTINGS switch
+# because the sub-page, not the main list, is what dispatches them now.
+function Invoke-SettingsAction([string]$key) {
+    switch ($key) {
+        'NonSteam' {
+            $script:nonSteamEnabled = -not $script:nonSteamEnabled
+            $settings['NonSteam'] = $script:nonSteamEnabled
+            Save-Settings
+            try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
+            Add-MaProfileTags $games
+            Build-Tabs   # rebuild Steam tabs with/without non-Steam apps
+        }
+        'Recent' {
+            $script:recentEnabled = -not $script:recentEnabled
+            $settings['Recent'] = $script:recentEnabled
+            Save-Settings
+            Build-Tabs   # apply or undo the recent-first sorting
+        }
+        'VideoPlayer' {
+            if (-not $script:playerHost) {
+                # Nothing to switch to: say what's missing rather than
+                # toggle a setting that couldn't be honoured.
+                $script:pendingNotice = 'The built-in player uses VLC as its engine. Install VLC (videolan.org) and it appears here.'
+            } else {
+                $script:builtinPlayer = -not $script:builtinPlayer
+                $settings['VideoPlayer'] = if ($script:builtinPlayer) { 'builtin' } else { 'default' }
+                Save-Settings
+            }
+        }
+        'PlayerHints' {
+            $script:playerHints = -not $script:playerHints
+            $settings['PlayerHints'] = $script:playerHints
+            Save-Settings
+            # Nothing on screen here changes - the next player launch reads it.
+        }
+        'Subtitles' {
+            $script:subtitlesOn = -not $script:subtitlesOn
+            $settings['Subtitles'] = $script:subtitlesOn
+            Save-Settings
+        }
+        'VideoHist' {
+            $script:videoHistEnabled = -not $script:videoHistEnabled
+            $settings['VideoHistory'] = $script:videoHistEnabled
+            Save-Settings
+            Build-Tabs   # rebuild file tabs with/without tags
+        }
+        'Watching' {
+            $script:watchingEnabled = -not $script:watchingEnabled
+            $settings['CurrentlyWatching'] = $script:watchingEnabled
+            Save-Settings
+            Build-Tabs   # apply or undo the CURRENTLY WATCHING section
+        }
+        'VlcInfo' {
+            $script:pendingNotice = 'With VLC (videolan.org): fullscreen playback, the menu returns when a video ends, and resume markers work.'
+        }
+    }
+}
+
+# A settings sub-page: looks like Pick-Option, but it stays open after a
+# choice and rebuilds its rows each pass, so a toggle shows its new value
+# where you are rather than sending you back to SETTINGS to check.
+function Show-SettingsGroup([string]$title, [scriptblock]$build) {
+    $script:inModal = $true
+    $sel = 0
+    $script:modalTop = 4; $script:modalOff = 0
+    $script:modalHover = 0
+    $notice = ''
+    Clear-Host
+    Get-Layout
+    while ($true) {
+        $rows = @(& $build)
+        if ($rows.Count -eq 0) { return }
+        $script:modalRows = $rows.Count; $script:modalCount = $rows.Count
+        if ($sel -ge $rows.Count) { $sel = $rows.Count - 1 }
+        Write-At 2 0 (Pad $title ($W - 4)) $theme.Accent
+        Write-At 2 2 (Hint '[ {Move}    {A}: change    {B}: back ]') $theme.Hint
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $rows[$i].Name + '  ') ($W - 3)) $theme.SelFg $theme.Accent }
+            else             { Write-At 1 (4 + $i) (Pad ('     ' + $rows[$i].Name + '  ') ($W - 3)) $theme.Text }
+        }
+        # Padded every pass, so the line blanks itself once the notice has
+        # been answered by the next keypress.
+        Write-At 2 (5 + $rows.Count) (Pad $notice ($W - 4)) $theme.Notice
+        $notice = ''
+        switch (Read-InputKey) {
+            'UpArrow'    { $sel = ($sel - 1 + $rows.Count) % $rows.Count }
+            'DownArrow'  { $sel = ($sel + 1) % $rows.Count }
+            'MouseHover' { $sel = $script:modalHover }
+            { "$_" -in 'Enter', 'MouseClick' } {
+                if ("$_" -eq 'MouseClick') { $sel = $script:modalHover }
+                Invoke-SettingsAction $rows[$sel].Key
+                # Shown here rather than left for the SETTINGS redraw: the
+                # answer belongs with the row that raised it.
+                if ($script:pendingNotice) { $notice = $script:pendingNotice; $script:pendingNotice = $null }
+            }
+            'Escape'    { return }
+            'Q'         { return }
+        }
     }
 }
 
@@ -2860,6 +3184,8 @@ try {
                     switch ($s.Key) {
                         'Tab'    { Edit-TabConfig $s.Index }
                         'AddTab' { Add-TabConfig }
+                        'GameSettings'  { Show-SettingsGroup 'GAME SETTINGS'  { Get-GameSettingsItems } }
+                        'VideoSettings' { Show-SettingsGroup 'VIDEO SETTINGS' { Get-VideoSettingsItems } }
                         'Quit'   { Clear-Host; exit 0 }
                         'ResetAll' {
                             $c = Pick-Option 'RESET ALL SETTINGS - ARE YOU SURE?' @(
@@ -2878,9 +3204,6 @@ try {
                                 exit 0
                             }
                         }
-                        'VlcInfo' {
-                            $script:pendingNotice = 'With VLC (videolan.org): fullscreen playback, the menu returns when a video ends, and resume markers work.'
-                        }
                         'ClearHist' {
                             $c = Pick-Option 'CLEAR HISTORY' @(
                                 'Recently played (games)', 'Video play counts', 'Both', 'Cancel')
@@ -2895,6 +3218,11 @@ try {
                                     if ($c -eq 1 -or $c -eq 2) {
                                         $script:watchMap = @{}
                                         Remove-Item (Join-Path $script:dataDir 'watch-history.json') -Force -ErrorAction SilentlyContinue
+                                        # Resume positions are video history too:
+                                        # leaving them behind would empty the play
+                                        # counts and keep CURRENTLY WATCHING full.
+                                        $script:resumeMap = @{}
+                                        Remove-Item $script:resumeFile -Force -ErrorAction SilentlyContinue
                                     }
                                     Build-Tabs
                                     $script:pendingNotice = 'History cleared'
@@ -2916,20 +3244,6 @@ try {
                             $settings['ShowBattery'] = $script:showBattery
                             Save-Settings
                         }
-                        'Recent' {
-                            $script:recentEnabled = -not $script:recentEnabled
-                            $settings['Recent'] = $script:recentEnabled
-                            Save-Settings
-                            Build-Tabs   # apply or undo the recent-first sorting
-                        }
-                        'NonSteam' {
-                            $script:nonSteamEnabled = -not $script:nonSteamEnabled
-                            $settings['NonSteam'] = $script:nonSteamEnabled
-                            Save-Settings
-                            try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
-                            Add-MaProfileTags $games
-                            Build-Tabs   # rebuild Steam tabs with/without non-Steam apps
-                        }
                         'AutoCheck' {
                             $script:autoCheck = -not $script:autoCheck
                             $settings['AutoUpdateCheck'] = $script:autoCheck
@@ -2941,17 +3255,13 @@ try {
                             Save-Settings
                             Set-MouseMode $script:mouseEnabled
                         }
-                        'VideoHist' {
-                            $script:videoHistEnabled = -not $script:videoHistEnabled
-                            $settings['VideoHistory'] = $script:videoHistEnabled
+                        'ButtonHints' {
+                            # Two values, so A flips it - no picker needed. The
+                            # Draw-All this branch ends with repaints the hint
+                            # row in the new words.
+                            $script:controlHints = if ($script:controlHints -eq 'gamepad') { 'keyboard' } else { 'gamepad' }
+                            $settings['ButtonHints'] = $script:controlHints
                             Save-Settings
-                            Build-Tabs   # rebuild file tabs with/without tags
-                        }
-                        'Watching' {
-                            $script:watchingEnabled = -not $script:watchingEnabled
-                            $settings['CurrentlyWatching'] = $script:watchingEnabled
-                            Save-Settings
-                            Build-Tabs   # apply or undo the CURRENTLY WATCHING section
                         }
                         'TextSize' {
                             $names = @($textSizes.Keys)
@@ -3029,7 +3339,102 @@ try {
                     Write-Host "    |_|___|    $($v.Name)" -ForegroundColor $theme.Logo
                     Write-Host ""
                     $landedAt = $null
-                    if ($isVideo -and $vlcExe) {
+                    if ($isVideo -and $script:builtinPlayer -and $script:playerHost) {
+                        # Our own player, in its own process (see Player.ps1 for
+                        # why it cannot be this one). We hold a real handle to
+                        # it, so unlike the VLC path there is no process-name
+                        # guessing and no start-up timeout to get wrong.
+                        $stateFile = Join-Path $script:dataDir 'player-state.json'
+                        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+                        $pargs = @(
+                            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden'
+                            '-File',      "`"$(Join-Path $PSScriptRoot 'Player.ps1')`""
+                            '-Video',     "`"$($v.Path)`""
+                            '-VlcDir',    "`"$script:vlcDir`""
+                            '-StateFile', "`"$stateFile`""
+                            # The look travels with the file: the same
+                            # colours this console is showing, at the same
+                            # text size, so the overlay is not visibly a
+                            # different program from the menu behind it.
+                            '-Theme',     (Get-ThemeRgbArg)
+                            '-TextPx',    [string]$textSizes[$script:textSizeName]
+                            '-Controls',  $script:controlHints
+                        )
+                        if (-not $script:playerHints) { $pargs += '-NoHints' }
+                        if ($script:subtitlesOn)      { $pargs += '-Subtitles' }
+                        # Start-Process does not quote list items for you, so
+                        # every path above carries its own quotes - without them
+                        # "Program Files (x86)" arrives as three arguments.
+                        if ($v.Resume -and ($script:videoHistEnabled -or $v.Watching)) {
+                            $pargs += @('-Start', [string][int]$v.Resume)
+                        }
+                        $proc = $null
+                        try {
+                            $proc = Start-Process $script:playerHost -ArgumentList $pargs -PassThru -WindowStyle Hidden
+                        } catch {}
+                        if (-not $proc) {
+                            Show-MenuWindow
+                            $script:pendingNotice = 'The built-in player would not start. SETTINGS -> Video settings can switch back to the default app.'
+                        } else {
+                            $script:landingPainted = $false
+                            $wrapSb = { Draw-WrapScreen $v.Name }.GetNewClosure()
+                            $wt0 = [DateTime]::Now
+                            $lastLand = -1
+                            while (-not $proc.HasExited) {
+                                # Same pre-paint trick the game path uses: while
+                                # the player covers the console, paint the wrap
+                                # screen onto it NOW, so the instant the player
+                                # window goes the screen behind it is already
+                                # right instead of showing a stale NOW PLAYING.
+                                if (Test-MenuCovered) {
+                                    $lm = [int]([DateTime]::Now - $wt0).TotalMinutes
+                                    if ($lm -ne $lastLand) {
+                                        try { & $wrapSb; $lastLand = $lm; $script:landingPainted = $true } catch {}
+                                    }
+                                }
+                                Start-Sleep -Milliseconds 300
+                            }
+                            Show-MenuWindow
+                            # One run can cover several files (LB/RB walks the
+                            # folder), so every row it reports is folded back in,
+                            # not just the one that was launched.
+                            $rows = @()
+                            try {
+                                if (Test-Path $stateFile) {
+                                    $rows = @((Get-Content $stateFile -Raw | ConvertFrom-Json).Results)
+                                }
+                            } catch {}
+                            $finished = $true
+                            $lastRow  = $null
+                            foreach ($r in $rows) {
+                                if (-not $r -or -not $r.Path) { continue }
+                                Set-Resume $r.Path ([int]$r.Seconds) ([string]$r.Last)
+                                if ($r.Finished -and $script:videoHistEnabled) { Record-VideoPlay $r.Path }
+                                if (-not $lastRow) { $lastRow = $r }
+                                else {
+                                    try { if ([DateTime]$r.Last -gt [DateTime]$lastRow.Last) { $lastRow = $r } } catch {}
+                                }
+                            }
+                            # The wrap screen names whatever they stopped on,
+                            # which after an LB/RB walk is not what they picked.
+                            $wrapName = $v.Name
+                            if ($lastRow) {
+                                $finished = [bool]$lastRow.Finished
+                                if ($lastRow.Path -ne $v.Path) {
+                                    $wrapName = [System.IO.Path]::GetFileName([string]$lastRow.Path)
+                                }
+                            } elseif ($proc.ExitCode -ne 0) {
+                                # Died before it recorded anything: don't claim a
+                                # watch, and don't leave the user wondering.
+                                $finished = $false
+                                $script:pendingNotice = 'The built-in player stopped unexpectedly. SETTINGS -> Video settings can switch back to the default app.'
+                            }
+                            if (-not $finished -or -not $script:landingPainted -or $wrapName -ne $v.Name) {
+                                Draw-WrapScreen $wrapName $finished
+                            }
+                            $landedAt = [DateTime]::Now
+                        }
+                    } elseif ($isVideo -and $vlcExe) {
                         # Resume explicitly: VLC's own continue-playback prompt
                         # is a mouse-only toast that vanishes after ~10s, so a
                         # gamepad user misses it and starts over. The [>>] tag
@@ -3046,7 +3451,13 @@ try {
                         Show-MenuWindow
                         # VLC clears its saved position on completion, so a
                         # leftover position means the user bailed partway.
-                        $finished = -not (Get-VlcResumeSeconds)[$v.Path.ToLower()]
+                        $vlcSecs  = (Get-VlcResumeSeconds)[$v.Path.ToLower()]
+                        $finished = -not $vlcSecs
+                        # Keep our own store level with VLC's. Skipping this
+                        # would let a position written by the built-in player
+                        # outlive the watch that VLC has just completed, and
+                        # the video would sit in CURRENTLY WATCHING for good.
+                        Set-Resume $v.Path $(if ($finished) { 0 } else { [int]$vlcSecs })
                         # Repaint unless the pre-paint behind VLC already said
                         # the right thing: while the video played there was no
                         # saved position to read, so that one always assumed a
