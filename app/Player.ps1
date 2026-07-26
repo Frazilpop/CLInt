@@ -121,6 +121,8 @@ public static extern IntPtr libvlc_audio_get_track_description(IntPtr mp);
 public static extern void libvlc_track_description_list_release(IntPtr p);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern int libvlc_audio_set_volume(IntPtr mp, int volume);
+[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+public static extern void libvlc_audio_set_mute(IntPtr mp, int status);
 '@
 
 # --- Native gamepad input (XInput) -------------------------------------
@@ -684,6 +686,12 @@ function Start-File([string]$path) {
     [CLIntVlc.N]::libvlc_media_player_set_hwnd($script:mp, $form.Handle)
     [CLIntVlc.N]::libvlc_media_player_play($script:mp) | Out-Null
     [CLIntVlc.N]::libvlc_audio_set_volume($script:mp, $script:volume) | Out-Null
+    # Windows keeps a per-app mute in the volume mixer, keyed to the host
+    # exe - so a "Windows PowerShell" once muted there stays muted, and
+    # libvlc's mmdevice output honours it forever after: pipeline up,
+    # volume 100, not a sound. This player has no mute of its own, so a
+    # muted session is never something it wants inherited.
+    [CLIntVlc.N]::libvlc_audio_set_mute($script:mp, 0)
     $script:paused = $false
     Show-Osd '' 3500
     return $true
