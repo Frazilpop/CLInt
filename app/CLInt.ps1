@@ -681,12 +681,15 @@ function Draw-LandingScreen($g, [DateTime]$t0) {
     Write-Host ""
 }
 
-# VLC's flavour of the same idea, for the same reason.
-function Draw-WrapScreen([string]$name) {
+# VLC's flavour of the same idea, for the same reason. A video the user
+# bailed out of never got a wrap, so say so - the caller decides which,
+# and the pre-paint can only assume the whole thing was watched.
+function Draw-WrapScreen([string]$name, [bool]$done = $true) {
+    $head = if ($done) { "THAT'S A WRAP" } else { 'TO BE CONTINUED...' }
     Clear-Host
     Write-Host ""
     Write-Host "     _____" -ForegroundColor $theme.Accent
-    Write-Host "    | |[] |    THAT'S A WRAP" -ForegroundColor $theme.Accent
+    Write-Host "    | |[] |    $head" -ForegroundColor $theme.Accent
     Write-Host "    |_|___|    $name" -ForegroundColor $theme.Logo
     Write-Host ""
 }
@@ -1026,8 +1029,11 @@ function Record-Play($game, [double]$mins) {
 }
 # Video history (Files tabs): play counts tracked here per machine, and
 # partially-watched positions read straight from VLC's own resume state,
-# so the [>>] tag shows the real continue-from timestamp.
-$videoHistEnabled = $settings['VideoHistory'] -ne $false
+# so the [>>] tag shows the real continue-from timestamp. CurrentlyWatching
+# lifts those part-watched videos into a section of their own; it reads the
+# same VLC state, so it stands on its own with video history switched off.
+$videoHistEnabled = $settings['VideoHistory']     -ne $false
+$watchingEnabled  = $settings['CurrentlyWatching'] -ne $false
 $watchFile = Join-Path $script:dataDir 'watch-history.json'
 $watchMap = @{}
 if (Test-Path $watchFile) {
@@ -1048,11 +1054,13 @@ function Record-VideoPlay([string]$path) {
 }
 # VLC stores resume positions in [RecentsMRL] of vlc-qt-interface.ini:
 # parallel 'list=' (file:/// URIs) and 'times=' (milliseconds; 0 = none).
-function Get-VlcResumeSeconds {
-    $map = @{}
+# Returned in VLC's own order, which is most-recently-opened first, with
+# the paths exactly as VLC wrote them - CURRENTLY WATCHING needs both.
+function Get-VlcResumeEntries {
+    $out = @()
     try {
         $ini = Join-Path $env:APPDATA 'vlc\vlc-qt-interface.ini'
-        if (-not (Test-Path $ini)) { return $map }
+        if (-not (Test-Path $ini)) { return $out }
         $inSect = $false; $list = $null; $times = $null
         foreach ($ln in (Get-Content $ini)) {
             if ($ln -match '^\[') { $inSect = ($ln.Trim() -eq '[RecentsMRL]'); continue }
@@ -1069,11 +1077,17 @@ function Get-VlcResumeSeconds {
                 $p = ([Uri]::UnescapeDataString($u.Substring(8))) -replace '/', '\'
                 $ms = [long]0
                 if ([long]::TryParse($ts[$i].Trim(), [ref]$ms) -and $ms -gt 0) {
-                    $map[$p.ToLower()] = [int]($ms / 1000)
+                    $out += [pscustomobject]@{ Path = $p; Seconds = [int]($ms / 1000) }
                 }
             }
         }
     } catch {}
+    return @($out)
+}
+# Lookup flavour of the same data, keyed by lower-cased path.
+function Get-VlcResumeSeconds {
+    $map = @{}
+    foreach ($e in (Get-VlcResumeEntries)) { $map[$e.Path.ToLower()] = $e.Seconds }
     return $map
 }
 
@@ -1130,6 +1144,51 @@ function Find-Vlc {
 $vlcExe     = Find-Vlc
 $videoExtRe = '^\.(mp4|mkv|avi|webm|mov|m4v|wmv|mpg|mpeg|ts|flv)$'
 
+# Videos VLC still holds a resume position for get a CURRENTLY WATCHING
+# section at the top of the tab's ROOT listing - the games tabs' RECENTLY
+# PLAYED idea, applied to what is half-watched rather than what was opened
+# last. Subfolders are included: a part-watched episode buried three levels
+# down is the one thing you want one keypress away, so it shows by its path
+# relative to the root. Only at the root, though - inside a subfolder the
+# listing is the plain browser again, or the same video would follow you
+# around. VLC drops a file from this list the moment it plays to the end,
+# so the section empties itself with no bookkeeping of ours.
+function Add-WatchingSection($t, $list, $entries) {
+    if (-not $script:watchingEnabled -or $entries.Count -eq 0) { return @($list) }
+    if (-not $t.Root -or $t.Dir -ne $t.Root) { return @($list) }
+    $prefix = $t.Root.TrimEnd('\') + '\'
+    $watching = @(); $taken = @{}
+    foreach ($e in $entries) {
+        if (-not $e.Path.StartsWith($prefix, 'OrdinalIgnoreCase')) { continue }   # another tab's folder
+        if ([System.IO.Path]::GetExtension($e.Path) -notmatch $script:videoExtRe) { continue }
+        # VLC remembers a path long after the file moved, was deleted, or
+        # went away with the drive it lived on - never list a dead row.
+        if (-not (Test-Path -LiteralPath $e.Path -PathType Leaf)) { continue }
+        $k = $e.Path.ToLower()
+        $plays = 0
+        if ($script:videoHistEnabled -and $script:watchMap[$k]) {
+            try { $plays = [int]$script:watchMap[$k].Plays } catch {}
+        }
+        $watching += [pscustomobject]@{
+            Name = $e.Path.Substring($prefix.Length); Path = $e.Path; Type = 'File'
+            Plays = $plays; Resume = $e.Seconds; Watching = $true
+        }
+        $taken[$k] = $true
+    }
+    if ($watching.Count -eq 0) { return @($list) }
+    # Lifted, not copied: a root-level video listed above must not show up
+    # again in the A-Z rows below it.
+    $rest = @($list | Where-Object { $_.Type -ne 'File' -or -not $taken[$_.Path.ToLower()] })
+    $out = @([pscustomobject]@{ Name = 'CURRENTLY WATCHING'; Unselectable = $true })
+    $out += $watching
+    if ($rest.Count -gt 0) {
+        $out += [pscustomobject]@{ Name = '';       Unselectable = $true }   # blank spacer row
+        $out += [pscustomobject]@{ Name = 'BROWSE'; Unselectable = $true }
+        $out += $rest
+    }
+    return @($out)
+}
+
 # File-browser tabs: '..' first (in subfolders), then folders that contain
 # at least one file somewhere below, then the files themselves. Videos
 # play via VLC; anything else opens with its default app.
@@ -1146,7 +1205,9 @@ function Get-FileItems($t) {
         Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
-    $vlcResume = if ($script:videoHistEnabled) { Get-VlcResumeSeconds } else { @{} }
+    $resumeEntries = if ($script:videoHistEnabled -or $script:watchingEnabled) { @(Get-VlcResumeEntries) } else { @() }
+    $vlcResume = @{}
+    foreach ($e in $resumeEntries) { $vlcResume[$e.Path.ToLower()] = $e.Seconds }
     $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
         Where-Object { -not $_.Name.StartsWith('.') } |
         ForEach-Object {
@@ -1162,7 +1223,7 @@ function Get-FileItems($t) {
                 Plays = $plays; Resume = $vlcResume[$k]
             }
         })
-    return $list
+    return @(Add-WatchingSection $t $list $resumeEntries)
 }
 
 # ---------------------------------------------------------------- Tabs ---
@@ -1266,6 +1327,8 @@ function Get-SettingsItems {
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'VideoHist'
                                 Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'Watching'
+                                Name = ('Currently watching first'.PadRight(30) + $(if ($script:watchingEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'AutoCheck'
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Mouse'
@@ -1345,6 +1408,7 @@ function Exit-FileDir($t) {
     $t.Items = @(Get-FileItems $t)
     $script:items    = $t.Items
     $script:selected = [Math]::Min($sel, [Math]::Max(0, $script:items.Count - 1))
+    Snap-Selection   # the root's CURRENTLY WATCHING section may have grown or shrunk while we were away
     $script:offset   = $off
     Draw-All
     return $true
@@ -1460,13 +1524,15 @@ function Draw-GameLine([int]$i) {
                 if ($m -ge 60) { $label += "  [$([int]($m / 60))h]" }
             }
         }
-    } elseif ($type -eq 'Files' -and $items[$i].Type -eq 'File' -and $script:videoHistEnabled) {
-        if ($items[$i].Resume) {
+    } elseif ($type -eq 'Files' -and $items[$i].Type -eq 'File') {
+        # A CURRENTLY WATCHING row is the resume position, so it carries the
+        # timestamp whether or not the video-history tags are switched on.
+        if ($items[$i].Resume -and ($script:videoHistEnabled -or $items[$i].Watching)) {
             $ts = [TimeSpan]::FromSeconds([double]$items[$i].Resume)
             $pos = if ($ts.Hours -gt 0) { $ts.ToString('h\:mm\:ss') } else { $ts.ToString('m\:ss') }
             $label += "  [>> $pos]"
         }
-        if ($items[$i].Plays -ge 1) { $label += "  [x$($items[$i].Plays)]" }
+        if ($script:videoHistEnabled -and $items[$i].Plays -ge 1) { $label += "  [x$($items[$i].Plays)]" }
     }
     if ($i -eq $selected) {
         Write-At 1 $y (Pad ("  >> " + $label + "  ") $lineW) $theme.SelFg $theme.Accent
@@ -1561,7 +1627,7 @@ function Draw-All {
     $count = switch ($cur.Type) {
         'Steam'     { "$nReal Steam games installed" }
         'Shortcuts' { "$nReal shortcuts" }
-        'Files'     { Pad "$($cur.Dir)  ($($items.Count) items)" ($W - 16) }
+        'Files'     { Pad "$($cur.Dir)  ($nReal items)" ($W - 16) }
         'Settings'  { 'settings are saved automatically' }
     }
     Write-At 15 1 $count $theme.Info
@@ -2881,6 +2947,12 @@ try {
                             Save-Settings
                             Build-Tabs   # rebuild file tabs with/without tags
                         }
+                        'Watching' {
+                            $script:watchingEnabled = -not $script:watchingEnabled
+                            $settings['CurrentlyWatching'] = $script:watchingEnabled
+                            Save-Settings
+                            Build-Tabs   # apply or undo the CURRENTLY WATCHING section
+                        }
                         'TextSize' {
                             $names = @($textSizes.Keys)
                             $c = Pick-Option 'TEXT SIZE' ($names + @('Cancel'))
@@ -2946,6 +3018,7 @@ try {
                 }
                 if ($cur.Type -eq 'Files') {
                     $v = $items[$selected]
+                    if ($v.Unselectable) { break }   # section row: nothing to open
                     if ($v.Type -eq 'Dir') { Enter-FileDir $cur $v.Path; break }
                     if ($v.Type -eq 'Up')  { Exit-FileDir $cur | Out-Null; break }
                     $isVideo = [System.IO.Path]::GetExtension($v.Path) -match $videoExtRe
@@ -2962,7 +3035,7 @@ try {
                         # gamepad user misses it and starts over. The [>>] tag
                         # already knows the position - hand it to VLC directly.
                         $vlcArgs = @('--fullscreen', '--play-and-exit')
-                        if ($script:videoHistEnabled -and $v.Resume) { $vlcArgs += "--start-time=$([int]$v.Resume)" }
+                        if ($v.Resume -and ($script:videoHistEnabled -or $v.Watching)) { $vlcArgs += "--start-time=$([int]$v.Resume)" }
                         $vlcArgs += "`"$($v.Path)`""
                         Start-Process $vlcExe -ArgumentList $vlcArgs
                         $script:landingPainted = $false
@@ -2971,16 +3044,21 @@ try {
                         # VLC is gone: get back on screen before the resume-tag
                         # refresh below so the desktop never shows through
                         Show-MenuWindow
-                        # pre-painted behind VLC while it played, same as games
-                        if (-not $script:landingPainted) { Draw-WrapScreen $v.Name }
+                        # VLC clears its saved position on completion, so a
+                        # leftover position means the user bailed partway.
+                        $finished = -not (Get-VlcResumeSeconds)[$v.Path.ToLower()]
+                        # Repaint unless the pre-paint behind VLC already said
+                        # the right thing: while the video played there was no
+                        # saved position to read, so that one always assumed a
+                        # full watch. Also covers the rare run where VLC never
+                        # took the screen and nothing was pre-painted at all.
+                        if (-not $finished -or -not $script:landingPainted) {
+                            Draw-WrapScreen $v.Name $finished
+                        }
                         $landedAt = [DateTime]::Now
                         # A launch is not a watch: only count a play once the
-                        # video reaches the end. VLC clears its saved position
-                        # on completion, so a leftover position means the user
-                        # bailed partway - resuming later isn't another play.
-                        if ($script:videoHistEnabled -and -not (Get-VlcResumeSeconds)[$v.Path.ToLower()]) {
-                            Record-VideoPlay $v.Path
-                        }
+                        # video reaches the end - resuming later isn't another play.
+                        if ($script:videoHistEnabled -and $finished) { Record-VideoPlay $v.Path }
                     } else {
                         # No VLC = no exit signal and no resume state: the old
                         # count-on-launch is the best available.
@@ -2989,12 +3067,14 @@ try {
                         Start-Sleep -Seconds 5
                         Show-MenuWindow
                     }
-                    if ($script:videoHistEnabled) {
-                        # refresh tags: VLC has just written its resume state
+                    if ($script:videoHistEnabled -or $script:watchingEnabled) {
+                        # refresh tags and the CURRENTLY WATCHING section: VLC
+                        # has just written (or cleared) its resume state
                         $keep = $selected
                         $cur.Items = @(Get-FileItems $cur)
                         $script:items = $cur.Items
                         $script:selected = [Math]::Min($keep, [Math]::Max(0, $items.Count - 1))
+                        Snap-Selection   # a finished video leaves the section, shifting every row under it
                     }
                     if ($landedAt) {
                         $left = 1500 - ([DateTime]::Now - $landedAt).TotalMilliseconds
