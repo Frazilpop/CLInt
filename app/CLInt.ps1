@@ -131,6 +131,29 @@ try {
     if (Test-Path $hk) { . $hk; $script:hotkeyReady = $true }
 } catch {}
 
+# The hotkey script reads its own code exactly once, when it starts - so
+# an update that changes CLIntKey.ahk changes NOTHING until the running
+# copy is swapped for one started from the new file. Left alone, that is
+# the whole session: the key keeps doing what the old version did, from a
+# process nobody thinks of as running (v1.2.4's player-aware key looked
+# simply broken this way). So the version the running script was last
+# cycled for is stamped in data\, and a mismatch here - the first CLInt
+# start after any update - restarts it. Stamped even when the restart
+# fails or nothing was running: the logon Run entry always starts the new
+# file, and a copy this can't stop (elevated) is one it could never stop
+# by retrying every launch either.
+try {
+    $hkStamp = Join-Path $script:dataDir 'hotkey-version.txt'
+    $stamped = ''
+    try { $stamped = ([string](Get-Content $hkStamp -TotalCount 1 -ErrorAction SilentlyContinue)).Trim() } catch {}
+    if ($script:hotkeyReady -and $appVersion -ne '?' -and $stamped -ne $appVersion) {
+        if ((Test-AnyAhkProcess) -and (Test-MenuKeyLive $script:rootDir 1500)) {
+            if (Stop-HotkeyScript $script:rootDir) { Start-HotkeyScript $script:rootDir | Out-Null }
+        }
+        Set-Content $hkStamp $appVersion -Encoding Ascii
+    }
+} catch {}
+
 # ------------------------------------------------------------- Steam ---
 function Get-SteamPath {
     $p = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue).SteamPath

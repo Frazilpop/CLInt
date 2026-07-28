@@ -628,11 +628,13 @@ function Show-Note([string]$text, [int]$ms = 3000) {
     $script:toastText  = Fit $text ($script:cols - 4)
     $script:toastUntil = [Environment]::TickCount + $ms
     # A cell of quiet either side of the text, the strip's own padding above
-    # and below, and a cell of margin off the screen's edges.
+    # and below, and a margin off the screen's edges. The margin is the cell
+    # WIDTH on both sides - a cell is taller than it is wide, so using the
+    # height above put the card visibly lower than it sat from the right.
     $w = ($script:toastText.Length + 2) * $script:cw
     $h = $script:ch + $script:padTop + $script:padBot
     $toast.Size     = New-Object Drawing.Size($w, $h)
-    $toast.Location = New-Object Drawing.Point(($sc.X + $sc.Width - $w - $script:cw), ($sc.Y + $script:ch))
+    $toast.Location = New-Object Drawing.Point(($sc.X + $sc.Width - $w - $script:cw), ($sc.Y + $script:cw))
     if (-not $toast.Visible) { $toast.Show($form) }
     $toast.Invalidate()
 }
