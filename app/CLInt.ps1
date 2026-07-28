@@ -131,26 +131,46 @@ try {
     if (Test-Path $hk) { . $hk; $script:hotkeyReady = $true }
 } catch {}
 
-# The hotkey script reads its own code exactly once, when it starts - so
-# an update that changes CLIntKey.ahk changes NOTHING until the running
-# copy is swapped for one started from the new file. Left alone, that is
-# the whole session: the key keeps doing what the old version did, from a
-# process nobody thinks of as running (v1.2.4's player-aware key looked
-# simply broken this way). So the version the running script was last
-# cycled for is stamped in data\, and a mismatch here - the first CLInt
-# start after any update - restarts it. Stamped even when the restart
-# fails or nothing was running: the logon Run entry always starts the new
-# file, and a copy this can't stop (elevated) is one it could never stop
-# by retrying every launch either.
+# The hotkey script now watches its own file and reloads itself when an
+# update swaps it (see CLIntKey.ahk) - but the copy running on a machine
+# that has just updated is, by definition, from before that existed. So
+# the first CLInt start after an update still cycles a running script by
+# hand, once. The v1.2.5 version of this went through a liveness
+# handshake and swallowed every failure, then stamped over the evidence -
+# which on at least one machine left the old script holding the key with
+# nothing anywhere saying why. Hence the two rules here: any AutoHotkey
+# presence at all is reason to cycle (Stop has its own cheap exits when
+# every copy belongs to someone else), and a failed cycle is SAID (the
+# notice) and NOT stamped, so the next start tries again instead of
+# pretending it worked.
+$script:hotkeyUpdateNotice = $null
 try {
     $hkStamp = Join-Path $script:dataDir 'hotkey-version.txt'
     $stamped = ''
     try { $stamped = ([string](Get-Content $hkStamp -TotalCount 1 -ErrorAction SilentlyContinue)).Trim() } catch {}
     if ($script:hotkeyReady -and $appVersion -ne '?' -and $stamped -ne $appVersion) {
-        if ((Test-AnyAhkProcess) -and (Test-MenuKeyLive $script:rootDir 1500)) {
-            if (Stop-HotkeyScript $script:rootDir) { Start-HotkeyScript $script:rootDir | Out-Null }
+        $cycled = $true
+        # Evidence gate: the key file or the status handshake existing is
+        # what says CLInt's hotkey was ever set up here. Without it, the
+        # AutoHotkey seen running is someone else's (a keyboard remapper,
+        # whatever) and there is nothing of ours to cycle - or to nag
+        # about failing to.
+        $ours = (Get-MenuKeyName $script:rootDir) -or (Test-Path (Get-HotkeyPaths $script:rootDir).Status)
+        if ($ours -and (Test-AnyAhkProcess)) {
+            if (Stop-HotkeyScript $script:rootDir) {
+                if ((Get-MenuKeyName $script:rootDir) -ne 'off') {
+                    $err = Start-HotkeyScript $script:rootDir
+                    if ($err) {
+                        $cycled = $false
+                        $script:hotkeyUpdateNotice = "The menu key script did not restart after the update. $err"
+                    }
+                }
+            } else {
+                $cycled = $false
+                $script:hotkeyUpdateNotice = 'An older menu key script is still running and CLInt could not replace it. Sign out and back in to finish the update.'
+            }
         }
-        Set-Content $hkStamp $appVersion -Encoding Ascii
+        if ($cycled) { Set-Content $hkStamp $appVersion -Encoding Ascii }
     }
 } catch {}
 
@@ -1988,7 +2008,11 @@ function Draw-Status {
 }
 
 $noticeShown = $false
-$pendingNotice = $null   # set by modals; shown after the next full redraw
+# Set by modals; shown after the next full redraw. Seeded with whatever
+# the startup hotkey cycle had to report - that ran long before this
+# variable existed, and its one failure mode is precisely the kind that
+# shows nothing anywhere else.
+$pendingNotice = $script:hotkeyUpdateNotice
 function Show-Notice([string]$text) {
     Write-At 15 4 (Pad $text ($W - 16)) $theme.Notice
     $script:noticeShown = $true
@@ -2778,7 +2802,7 @@ function Configure-MenuKey {
         if (-not $curKey -and $st) { $curKey = $st.Key }
         $title = "MENU KEY  --  currently: $(Get-MenuKeyLabel $curKey)"
         if ($st -and $st.State -in 'fail', 'unknown') { $title += '   (not working - pick another)' }
-        $opts = @('Choose from a list  (the reliable way for Fn-layer keys)',
+        $opts = @('Choose from a list',
                   'Press the key I want to use',
                   'Turn the menu key off',
                   'Done')

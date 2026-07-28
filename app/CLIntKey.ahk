@@ -37,6 +37,22 @@ lastState  := ""     ; what we last told CLInt through statFile
 lastKey    := ""
 waitUntil  := 0
 
+; The CODE is watched too, not just the key file: an update swaps
+; CLIntKey.ahk on disk, but a running script never re-reads its own code,
+; so the old version kept the key until the next sign-in - from a process
+; nobody thinks of as running, doing what the previous release did
+; (v1.2.4's player-aware key looked simply broken this way). Orchestrating
+; a restart from PowerShell proved fragile: it needed CLInt to notice, a
+; process it may not be allowed to see, and a handshake with the very
+; script being replaced. Reload needs none of that - the script swaps
+; ITSELF for the new file, same path, same privilege, no other process
+; involved. codePending makes a changed timestamp count only once it has
+; sat still for a whole tick, so a copy still in progress is never loaded
+; half-written.
+codeStamp   := ""
+try codeStamp := FileGetTime(A_ScriptFullPath, "M")
+codePending := ""
+
 ; NOTHING here may ever put a dialog on screen. This script has no window,
 ; no taskbar button and starts at logon, so AutoHotkey's default error box
 ; arrives as a modal from an application the user doesn't know is running -
@@ -55,6 +71,7 @@ SetTimer WatchFiles, 400
 
 WatchFiles() {
     global keyFile, cmdFile, statFile, applied, lastState, lastKey
+    global codeStamp, codePending
     ; One-shot orders. The uninstaller asks this way because killing the
     ; process outright fails when this copy was started elevated.
     if FileExist(cmdFile) {
@@ -66,6 +83,21 @@ WatchFiles() {
             ExitApp
         }
     }
+    ; A changed script file means an update has landed: hand the key to the
+    ; new code (see codeStamp above). After "exit", never instead of it - a
+    ; script the uninstaller just asked to leave must not come back newer.
+    m := ""
+    try m := FileGetTime(A_ScriptFullPath, "M")
+    if (m != "" && codeStamp = "")
+        codeStamp := m                  ; the startup read failed; adopt it now
+    else if (m != "" && m != codeStamp) {
+        if (m = codePending) {
+            Reload                      ; the new code takes the key from here
+            return
+        }
+        codePending := m
+    } else
+        codePending := ""
     wanted := ReadWantedKey()
     if (wanted != applied) {
         applied := wanted
