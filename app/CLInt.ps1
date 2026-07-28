@@ -705,13 +705,25 @@ function Test-MenuCovered {
 # protection and sit invisible BEHIND the fullscreen menu (seen when Steam
 # is cold-started silently in the tray). We hold the foreground, so step
 # aside: minimise ourselves and Windows activates the game window on top.
+#
+# Returns whether it actually stepped aside, and the callers stop asking
+# once it has. Stepping aside is a one-shot courtesy, not a policy: after
+# the first minimise, a console holding the foreground again means the
+# USER put it there (the menu key, the taskbar), and re-minimising it made
+# the menu look impossible to bring back for as long as the game dawdled
+# over claiming a window - restore, half a second, gone again. The latch
+# in Wait-ForGameExit can't cover this on its own: after we minimise, the
+# foreground is allowed to sit on nothing at all (a game still loading has
+# no window to give it to), and a null foreground sets no latch.
 function Hide-MenuForGame {
-    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return $false }
     try {
         if ([CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) {
             [CLIntFocus.Win]::ShowWindow($script:conHwnd, 6) | Out-Null   # SW_MINIMIZE
+            return $true
         }
     } catch {}
+    return $false
 }
 
 # Bring the menu back after a game/video: un-minimise only if we stepped
@@ -1465,9 +1477,10 @@ function Get-PlayerHost([string]$dir) {
     return $null
 }
 $playerHost = Get-PlayerHost $vlcDir
-# Default off: an upgrade should not silently change how videos open. The
-# SETTINGS row turns it on, and stays out of the way when there's no engine.
-$builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -eq 'builtin')
+# Default on: CLInt's own player is the intended experience wherever the
+# engine exists. Only an explicit "default app" choice in SETTINGS - saved
+# as 'default' - opts out; no engine means no built-in player regardless.
+$builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -ne 'default')
 
 # Videos VLC still holds a resume position for get a CURRENTLY WATCHING
 # section at the top of the tab's ROOT listing - the games tabs' RECENTLY
@@ -2972,7 +2985,7 @@ function Show-GameMenu($g) {
     # say about it - Y is simply inert on those rows.
     if (-not $g.Steam) { return }
     $name = "$([string]$g.Name)".ToUpper()
-    $c = Pick-Option $name @('Uninstall this game', 'Cancel')
+    $c = Pick-Option $name @('Uninstall this game', 'Return')
     if ($c -ne 0) { Draw-All; return }
     # Our own confirmation, driven by the d-pad like everything else here.
     # It is not a formality: app_uninstall below removes the game outright
@@ -3059,7 +3072,7 @@ function Show-VideoMenu($v) {
             $pos = if ($ts.Hours -gt 0) { $ts.ToString('h\:mm\:ss') } else { $ts.ToString('m\:ss') }
             $opts += "Reset play position  (stopped at $pos)"; $acts += 'pos'
         }
-        $opts += 'Done'; $acts += 'done'
+        $opts += 'Return'; $acts += 'done'
         $c = Pick-Option "$([string]$v.Name)  --  played $plays" $opts
         if ($c -lt 0 -or $acts[$c] -eq 'done') { break }
         switch ($acts[$c]) {
@@ -3280,6 +3293,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
         $waitT0    = [DateTime]::Now
         $lastLandMin  = -1
         $gameHadFocus = $false
+        $steppedAside = $false
         while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
             $now = [DateTime]::Now
             if ($now -lt $holdUntil) {
@@ -3292,7 +3306,10 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                     if (-not $gameHadFocus) {
                         try { $gameHadFocus = [CLIntFocus.Win]::GetForegroundWindow() -notin @($script:conHwnd, [IntPtr]::Zero) } catch {}
                     }
-                    if (-not $gameHadFocus) { Hide-MenuForGame }
+                    # Once per launch (see Hide-MenuForGame): a console back
+                    # in front after that is the user's doing, not ours to
+                    # undo.
+                    if (-not $gameHadFocus -and -not $steppedAside) { $steppedAside = Hide-MenuForGame }
                 }
             }
             # While the game covers the screen the console is invisible: paint
@@ -3329,6 +3346,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
     $waitT0    = [DateTime]::Now
     $lastLandMin  = -1
     $gameHadFocus = $false
+    $steppedAside = $false
     $gameHwnd  = [IntPtr]::Zero
     while ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) {
         $now = [DateTime]::Now
@@ -3346,7 +3364,9 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                         $gameHwnd     = $fg
                     }
                 } catch {}
-                if (-not $gameHadFocus) { Hide-MenuForGame }
+                # Once per launch (see Hide-MenuForGame): a console back in
+                # front after that is the user's doing, not ours to undo.
+                if (-not $gameHadFocus -and -not $steppedAside) { $steppedAside = Hide-MenuForGame }
             }
         }
         # Pre-paint the landing screen onto the covered console while the game
@@ -3698,6 +3718,12 @@ try {
                         # guessing and no start-up timeout to get wrong.
                         $stateFile = Join-Path $script:dataDir 'player-state.json'
                         Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+                        # The player announces its window in player.hwnd for
+                        # the menu key (see CLIntKey.ahk) and removes it on
+                        # exit - but a hard crash removes nothing, so it is
+                        # swept on both sides of every run.
+                        $playerHwnd = Join-Path $script:dataDir 'player.hwnd'
+                        Remove-Item $playerHwnd -Force -ErrorAction SilentlyContinue
                         $pargs = @(
                             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden'
                             '-File',      "`"$(Join-Path $PSScriptRoot 'Player.ps1')`""
@@ -3746,6 +3772,7 @@ try {
                                 }
                                 Start-Sleep -Milliseconds 300
                             }
+                            Remove-Item $playerHwnd -Force -ErrorAction SilentlyContinue
                             Show-MenuWindow
                             # One run can cover several files (LB/RB walks the
                             # folder), so every row it reports is folded back in,

@@ -153,6 +153,24 @@ WriteStatus(state, key) {
 
 ToggleMenu(*) {
     global waitUntil
+    ; The built-in player, when one is up, owns the key. Frontmost -> put
+    ; the whole of CLInt away (the player pauses ITSELF on minimize - see
+    ; Player.ps1 - so nothing here waits on another process); minimized or
+    ; behind -> bring the film back. The menu window is minimized along
+    ; with the player rather than left showing, because "the CLInt button
+    ; puts CLInt away" should mean all of it, and the player's own exit
+    ; path restores the menu when the film actually ends.
+    if phwnd := PlayerWindow() {
+        if WinGetMinMax(phwnd) = -1
+            Activate(phwnd)
+        else if WinActive(phwnd) {
+            WinMinimize phwnd
+            if mhwnd := MenuWindow()
+                try WinMinimize mhwnd
+        } else
+            Activate(phwnd)
+        return
+    }
     if hwnd := MenuWindow() {
         ; Minimized wins over "active": right after minimizing, Windows can
         ; still report the window as active (focus sits on the taskbar), and
@@ -223,6 +241,19 @@ Activate(hwnd) {
 ; single-instance check catches any duplicate.
 MenuWindow() {
     try hwnd := Integer(Trim(FileRead(dataDir "\clint.hwnd"), " `t`r`n"))
+    catch
+        return 0
+    SetTitleMatchMode 3   ; exact title
+    return WinExist("CLInt ahk_id " hwnd)
+}
+
+; Same handshake for the built-in player: Player.ps1 writes player.hwnd as
+; its window comes up and removes it on the way out (CLInt sweeps it too,
+; in case the player crashed and left it behind). Handle AND title again -
+; a recycled handle must not turn the menu key into a minimize-random-
+; window key.
+PlayerWindow() {
+    try hwnd := Integer(Trim(FileRead(dataDir "\player.hwnd"), " `t`r`n"))
     catch
         return 0
     SetTitleMatchMode 3   ; exact title

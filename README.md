@@ -61,17 +61,19 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
 
 ## Video player
 
-Videos open in your usual player unless you switch to CLInt's own under
-**SETTINGS → Video settings → Video player**.
+Videos open in CLInt's own player, unless you switch back to your usual
+one under **SETTINGS → Video settings → Video player**.
 
-The built-in one needs VLC installed — it plays through VLC's engine
+The built-in player needs VLC installed — it plays through VLC's engine
 without ever opening the VLC window. No VLC and that row says so, and
-videos keep opening the way they do now. Nothing else to install.
+videos open in your usual player instead. Nothing else to install.
 
 Fullscreen and controller-driven: A pauses, B returns to CLInt, the D-pad
 seeks and sets volume (up to 150%), X cycles subtitles, Y audio tracks,
 and LB/RB step through the folder's other episodes. It remembers where you
-stopped.
+stopped. The menu key works mid-film too: press it to pause and put CLInt
+away, press it again to bring the film back. A double-click (or
+double-tap) on the picture also returns to CLInt.
 
 Subtitles start off. **SETTINGS → Video settings → Subtitles on by
 default** turns them on, and works both for an `.srt` sitting beside the

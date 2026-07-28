@@ -72,6 +72,12 @@ public static void KeepAwake(bool on) {
 }
 [DllImport("user32.dll")]
 public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")]
+public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")]
+public static extern short GetAsyncKeyState(int vKey);
+[DllImport("user32.dll")]
+public static extern uint GetDoubleClickTime();
 
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern IntPtr libvlc_new(int argc, string[] argv);
@@ -91,6 +97,10 @@ public static extern int libvlc_media_player_play(IntPtr mp);
 public static extern void libvlc_media_player_stop(IntPtr mp);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern void libvlc_media_player_set_hwnd(IntPtr mp, IntPtr drawable);
+[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+public static extern void libvlc_video_set_key_input(IntPtr mp, uint on);
+[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+public static extern void libvlc_video_set_mouse_input(IntPtr mp, uint on);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern long libvlc_media_player_get_length(IntPtr mp);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
@@ -258,7 +268,7 @@ $script:volume    = [Math]::Max(0, [Math]::Min($VOL_MAX, $Volume))
 $script:seekTo    = $Start
 $script:osdUntil  = 0            # tick count the OSD hides at (0 = hidden)
 $script:osdPinned = $false
-$script:osdNote   = ''           # transient right-hand message ("Subs: English")
+$script:osdNote   = ''           # transient right-hand message ("Volume 60%")
 $script:quitting  = $false
 # Subtitle auto-pick, once per file. See the block in the timer that uses it.
 $script:subsPicked = $false
@@ -591,6 +601,42 @@ function Hide-Osd {
     if ($osd.Visible -and -not $script:osdPinned) { $osd.Hide() }
 }
 
+# The corner card: one line of text, top-right, the way VLC announces a
+# track change. Subtitle and audio switches use this instead of the full
+# strip because the strip lands exactly where subtitles render - putting
+# it up to say "Subs: English" would cover the first line of the thing
+# just switched on.
+$toast = New-Object ClintOsdForm
+$toast.FormBorderStyle = 'None'
+$toast.BackColor       = $ink.Bg
+$toast.ShowInTaskbar   = $false
+$toast.StartPosition   = 'Manual'
+$toast.Visible         = $false
+$script:toastText  = ''
+$script:toastUntil = 0
+
+$toast.Add_Paint({
+    param($sender, $e)
+    if (-not $script:toastText) { return }
+    [Windows.Forms.TextRenderer]::DrawText($e.Graphics, $script:toastText, $script:font,
+        (New-Object Drawing.Point($script:cw, $script:padTop)),
+        $ink.Notice, [Windows.Forms.TextFormatFlags]::NoPadding)
+})
+
+function Show-Note([string]$text, [int]$ms = 3000) {
+    $sc = [Windows.Forms.Screen]::FromControl($form).Bounds
+    $script:toastText  = Fit $text ($script:cols - 4)
+    $script:toastUntil = [Environment]::TickCount + $ms
+    # A cell of quiet either side of the text, the strip's own padding above
+    # and below, and a cell of margin off the screen's edges.
+    $w = ($script:toastText.Length + 2) * $script:cw
+    $h = $script:ch + $script:padTop + $script:padBot
+    $toast.Size     = New-Object Drawing.Size($w, $h)
+    $toast.Location = New-Object Drawing.Point(($sc.X + $sc.Width - $w - $script:cw), ($sc.Y + $script:ch))
+    if (-not $toast.Visible) { $toast.Show($form) }
+    $toast.Invalidate()
+}
+
 # The overlay, laid out the way CLInt lays out a screen: mascot at the far
 # left, everything else in one column to the right of it, a bracketed hint
 # row along the bottom. Nothing here is anti-aliased, rounded or floated -
@@ -631,8 +677,8 @@ $osd.Add_Paint({
         Write-Cell $g ($c0 + $head.Length + 2) $rHead '[PAUSED]' $ink.Notice
     }
 
-    # Transient messages ("Volume 60%", "Subs: English") ride the heading
-    # row, right-aligned, in the colour CLInt shows its own notices in.
+    # Transient messages ("Volume 60%", "+15s") ride the heading row,
+    # right-aligned, in the colour CLInt shows its own notices in.
     if ($script:osdNote) {
         $note = Fit $script:osdNote ($right - $c0 - $head.Length - 12)
         if ($note) { Write-Cell $g ($right - $note.Length + 1) $rHead $note $ink.Notice }
@@ -684,6 +730,14 @@ function Start-File([string]$path) {
     $script:mp = [CLIntVlc.N]::libvlc_media_player_new_from_media($script:media)
     if ($script:mp -eq [IntPtr]::Zero) { return $false }
     [CLIntVlc.N]::libvlc_media_player_set_hwnd($script:mp, $form.Handle)
+    # Embedded like this, libvlc's video window claims the keyboard and
+    # mouse for its own hotkeys by default - the form then never sees a
+    # keypress once that child window has focus, and Space stops pausing.
+    # Both stay ours; the form's own handlers are the only input path.
+    try {
+        [CLIntVlc.N]::libvlc_video_set_key_input($script:mp, 0)
+        [CLIntVlc.N]::libvlc_video_set_mouse_input($script:mp, 0)
+    } catch {}
     [CLIntVlc.N]::libvlc_media_player_play($script:mp) | Out-Null
     [CLIntVlc.N]::libvlc_audio_set_volume($script:mp, $script:volume) | Out-Null
     # Windows keeps a per-app mute in the volume mixer, keyed to the host
@@ -750,26 +804,26 @@ function Adjust-Volume([int]$delta) {
 function Step-Spu {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $tracks = Get-TrackList ([CLIntVlc.N]::libvlc_video_get_spu_description($script:mp))
-    if ($tracks.Count -le 1) { Show-Osd 'No subtitles'; return }
+    if ($tracks.Count -le 1) { Show-Note 'No subtitles'; return }
     $cur = [CLIntVlc.N]::libvlc_video_get_spu($script:mp)
     $i = 0
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
     $next = $tracks[($i + 1) % $tracks.Count]
     [CLIntVlc.N]::libvlc_video_set_spu($script:mp, $next.Id) | Out-Null
-    Show-Osd ("Subs: " + $(if ($next.Id -eq -1) { 'off' } else { $next.Name }))
+    Show-Note ("Subs: " + $(if ($next.Id -eq -1) { 'off' } else { $next.Name }))
 }
 
 function Step-Audio {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $tracks = @(Get-TrackList ([CLIntVlc.N]::libvlc_audio_get_track_description($script:mp)) |
                 Where-Object { $_.Id -ne -1 })   # muting by cycling tracks is a trap, not a feature
-    if ($tracks.Count -le 1) { Show-Osd 'One audio track'; return }
+    if ($tracks.Count -le 1) { Show-Note 'One audio track'; return }
     $cur = [CLIntVlc.N]::libvlc_audio_get_track($script:mp)
     $i = 0
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
     $next = $tracks[($i + 1) % $tracks.Count]
     [CLIntVlc.N]::libvlc_audio_set_track($script:mp, $next.Id) | Out-Null
-    Show-Osd ("Audio: " + $next.Name)
+    Show-Note ("Audio: " + $next.Name)
 }
 
 function Step-Episode([int]$delta) {
@@ -866,6 +920,31 @@ function Read-Pad {
     }
 }
 
+# Double-click (or double-tap, on a touchscreen) leaves the film the same
+# way Esc and B do. Polled like the pad, not a MouseDoubleClick handler:
+# the vout child window owns every pixel the film is on, so the form never
+# hears a click land there. GetAsyncKeyState hears it wherever it lands,
+# and the foreground check keeps a double-click in some OTHER window - a
+# dialog that stole focus - from quietly ending the film behind it.
+$script:lmbPrev    = $false
+$script:lastClick  = -1000000
+$script:dblClickMs = [int][CLIntVlc.N]::GetDoubleClickTime()
+
+function Read-Mouse {
+    $down = ([CLIntVlc.N]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
+    if ($down -and -not $script:lmbPrev -and
+        [CLIntVlc.N]::GetForegroundWindow() -eq $form.Handle) {
+        $now = [Environment]::TickCount
+        if (($now - $script:lastClick) -le $script:dblClickMs) {
+            $script:lastClick = -1000000
+            Stop-Player
+        } else {
+            $script:lastClick = $now
+        }
+    }
+    $script:lmbPrev = $down
+}
+
 # ------------------------------------------------------------ main pump ---
 # One timer drives everything: gamepad edges at 40ms, and the slower
 # position/state work on every fifth tick. libvlc is polled rather than
@@ -875,7 +954,11 @@ $script:tick = 0
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 40
 $timer.Add_Tick({
-    Read-Pad
+    # XInput is global - it reads the controller whether or not this window
+    # has it. Fullscreen that distinction never showed, but a player put
+    # away by the menu key must not keep acting on a controller that is now
+    # playing something else: B here is "quit the film".
+    if ($form.WindowState -ne 'Minimized') { Read-Pad; Read-Mouse } else { $script:padHeld = $null }
     $script:tick++
     if ($script:tick % 5 -ne 0) { return }
 
@@ -921,7 +1004,7 @@ $timer.Add_Tick({
                 if ($cur -eq -1) {
                     $first = @($subs | Where-Object { $_.Id -ne -1 })[0]
                     [CLIntVlc.N]::libvlc_video_set_spu($script:mp, $first.Id) | Out-Null
-                    Show-Osd ("Subs: " + $first.Name) 3000
+                    Show-Note ("Subs: " + $first.Name) 3000
                 }
             } elseif ($cur -ne -1) {
                 [CLIntVlc.N]::libvlc_video_set_spu($script:mp, -1) | Out-Null
@@ -945,9 +1028,42 @@ $timer.Add_Tick({
             $osd.Invalidate()
         }
     }
+
+    if ($toast.Visible -and $script:toastUntil -and [Environment]::TickCount -gt $script:toastUntil) {
+        $script:toastText  = ''
+        $script:toastUntil = 0
+        $toast.Hide()
+    }
+})
+
+# The menu key works while a film is up: CLIntKey.ahk reads player.hwnd
+# (the same handshake as clint.hwnd) and minimizes this window to get out
+# of the way. Pausing on minimize lives HERE rather than in the hotkey
+# script, so that a film also stops when anything else minimizes the
+# window - Win+D, another launcher, whatever. Restoring does not resume:
+# coming back to a paused picture and pressing A is better than audio
+# starting the instant the window reappears.
+$form.Add_Resize({
+    if ($script:mp -eq [IntPtr]::Zero -or $script:quitting) { return }
+    if ($form.WindowState -eq 'Minimized') {
+        if (-not $script:paused) {
+            $script:paused = $true
+            [CLIntVlc.N]::libvlc_media_player_set_pause($script:mp, 1)
+        }
+    } elseif ($script:paused) {
+        # Back on screen: the strip says why the picture is not moving,
+        # the same way a manual pause keeps it up.
+        Show-Osd '' 600000
+    }
 })
 
 $form.Add_Shown({
+    if ($StateFile) {
+        try {
+            Set-Content (Join-Path (Split-Path $StateFile -Parent) 'player.hwnd') `
+                ([int64]$form.Handle) -Encoding Ascii
+        } catch {}
+    }
     $sc = [Windows.Forms.Screen]::FromControl($form).Bounds
     # The strip is as tall as its contents, so the text size decides it -
     # the same setting that decides how big the menu's own rows are.
@@ -983,6 +1099,9 @@ try {
 } finally {
     try { Stop-Current } catch {}
     try { Save-State } catch {}
+    if ($StateFile) {
+        try { Remove-Item (Join-Path (Split-Path $StateFile -Parent) 'player.hwnd') -Force -ErrorAction SilentlyContinue } catch {}
+    }
     try { [Windows.Forms.Cursor]::Show() } catch {}
     try { [CLIntVlc.N]::KeepAwake($false) } catch {}
     try { [CLIntVlc.N]::libvlc_release($inst) } catch {}
