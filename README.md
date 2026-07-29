@@ -85,7 +85,8 @@ either way.
 D-pad or left stick up/down to move, left/right to switch tabs,
 A/Enter to launch, B to go back/quit, RB to cycle TDP for the
 highlighted game, and Y for the highlighted item's options. Quitting
-asks first — B again, or picking "No", keeps CLInt open.
+asks first, with Yes on top: B then A closes CLInt, and B again
+cancels the prompt.
 
 The controller is read natively via XInput. Keyboard works too — the
 on-screen prompts name gamepad buttons, and **SETTINGS → Button hints**

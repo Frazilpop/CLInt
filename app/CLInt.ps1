@@ -2643,11 +2643,13 @@ function Pick-Option([string]$title, [string[]]$options) {
 
 # B / Escape / Q used to close CLInt on the spot, which is easy to do by
 # accident on a pad - B is also the back button everywhere else. Ask first.
-# The cursor starts on No, so a stray A straight after a stray B leaves the
-# menu open; B itself cancels the prompt too. SETTINGS -> [ quit CLInt ]
-# stays a direct exit: getting there is already deliberate.
+# Yes sits on top and the cursor starts there, so quitting stays a two-press
+# muscle-memory move: B, A. An accidental B is still caught, because it takes
+# the second press to go through - and B again cancels the prompt outright.
+# SETTINGS -> [ quit CLInt ] stays a direct exit: getting there is already
+# deliberate.
 function Confirm-Quit {
-    return ((Pick-Option 'QUIT CLInt?' @('No - keep CLInt open', 'Yes - quit CLInt')) -eq 1)
+    return ((Pick-Option 'QUIT CLInt?' @('Yes - quit CLInt', 'No - keep CLInt open')) -eq 0)
 }
 
 # Icon picker: mascot list on the left, live art preview on the right.
