@@ -93,6 +93,8 @@ switches them to keyboard keys.
 The mouse works as well: hover to highlight, click to launch, right-click
 for the highlighted item's options, click a tab name to switch to it.
 Mouse can be turned off, if required, under: **SETTINGS → Mouse support**.
+**SETTINGS → Change tabs on hover** (off by default) drops the click from
+that last one: tabs then switch as soon as the pointer rests on them.
 
 ## Item options
 

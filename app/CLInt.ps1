@@ -1263,6 +1263,7 @@ $recentEnabled   = $settings['Recent']          -ne $false
 $playtimeEnabled = $settings['Playtime']        -ne $false
 $autoCheck       = $settings['AutoUpdateCheck'] -eq $true
 $mouseEnabled    = $settings['Mouse']           -ne $false
+$hoverTabs       = $settings['HoverTabs']       -eq $true
 $inModal = $false        # modals suppress the idle clock/battery repaint
 $batteryPct = -1
 $batteryNext = 0
@@ -1775,6 +1776,12 @@ function Get-SettingsItems {
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Mouse'
                                 Name = ('Mouse support'.PadRight(30) + $(if ($script:mouseEnabled) { 'on' } else { 'off' })) }
+    # Only worth showing while the mouse is on - otherwise it is a toggle
+    # that does nothing.
+    if ($script:mouseEnabled) {
+        $list += [pscustomobject]@{ Key = 'HoverTabs'
+                                    Name = ('Change tabs on hover'.PadRight(30) + $(if ($script:hoverTabs) { 'on' } else { 'off' })) }
+    }
     $list += [pscustomobject]@{ Key = 'MenuKey'
                                 Name = ('Menu key'.PadRight(30) +
                                         $(if ($script:hotkeyReady) { Get-MenuKeySummary $script:rootDir }
@@ -2251,6 +2258,18 @@ function Select-RowAt([int]$y) {
     return $i
 }
 
+# The tab bar is row 0; $tabHit holds each tab's cell extent as recorded
+# by the last Draw-All. Shared by the click path and the optional hover
+# path so both land on exactly the same tab for a given column.
+function Switch-TabAt([int]$x) {
+    foreach ($hit in $script:tabHit) {
+        if ($x -ge $hit[0] -and $x -le $hit[1]) {
+            if ($hit[2] -ne $script:tab) { Switch-Tab ($hit[2] - $script:tab) }
+            return
+        }
+    }
+}
+
 # Drain queued mouse events. They share the input buffer with key events -
 # and [Console]::KeyAvailable silently throws away whatever non-key events
 # sit in front of it - so this must run FIRST in the input loop. Hover
@@ -2351,6 +2370,15 @@ function Read-MouseEvent {
                 continue
             }
             if ($isMove) {   # movement: hover-select the row under the cursor
+                if ($r.Y -eq 0) {
+                    # Tab bar. Switching on hover is opt-in (HoverTabs, off by
+                    # default): the pointer crosses the bar on its way to the
+                    # window edge, and with it on that flips through every tab
+                    # it passes over - which is the point when you asked for
+                    # it and an accident when you did not.
+                    if ($script:hoverTabs) { Switch-TabAt $r.X }
+                    continue
+                }
                 Select-RowAt $r.Y | Out-Null
                 continue
             }
@@ -2363,12 +2391,7 @@ function Read-MouseEvent {
             }
             if (-not $press) { continue }
             if ($r.Y -eq 0) {   # tab bar
-                foreach ($hit in $script:tabHit) {
-                    if ($r.X -ge $hit[0] -and $r.X -le $hit[1]) {
-                        if ($hit[2] -ne $script:tab) { Switch-Tab ($hit[2] - $script:tab) }
-                        break
-                    }
-                }
+                Switch-TabAt $r.X
                 continue
             }
             if ((Select-RowAt $r.Y) -ge 0) { return 'Enter' }
@@ -3673,6 +3696,11 @@ try {
                             $settings['Mouse'] = $script:mouseEnabled
                             Save-Settings
                             Set-MouseMode $script:mouseEnabled
+                        }
+                        'HoverTabs' {
+                            $script:hoverTabs = -not $script:hoverTabs
+                            $settings['HoverTabs'] = $script:hoverTabs
+                            Save-Settings
                         }
                         'ButtonHints' {
                             # Two values, so A flips it - no picker needed. The
