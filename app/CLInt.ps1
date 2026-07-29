@@ -2641,6 +2641,15 @@ function Pick-Option([string]$title, [string[]]$options) {
     }
 }
 
+# B / Escape / Q used to close CLInt on the spot, which is easy to do by
+# accident on a pad - B is also the back button everywhere else. Ask first.
+# The cursor starts on No, so a stray A straight after a stray B leaves the
+# menu open; B itself cancels the prompt too. SETTINGS -> [ quit CLInt ]
+# stays a direct exit: getting there is already deliberate.
+function Confirm-Quit {
+    return ((Pick-Option 'QUIT CLInt?' @('No - keep CLInt open', 'Yes - quit CLInt')) -eq 1)
+}
+
 # Icon picker: mascot list on the left, live art preview on the right.
 # Returns a mascot name, '::auto' for automatic assignment, $null on cancel.
 function Pick-Mascot([string]$title, [string]$current) {
@@ -4060,9 +4069,13 @@ try {
             { "$_" -in 'M', 'Applications', 'MenuKey' } { Show-ItemMenu }
             'Escape'    {   # in a file-tab subfolder: go up a level; otherwise quit
                 if ($cur.Type -eq 'Files' -and (Exit-FileDir $cur)) { break }
-                Clear-Host; exit 0
+                if (Confirm-Quit) { Clear-Host; exit 0 }
+                Draw-All   # the prompt cleared the screen; put the menu back
             }
-            'Q'         { Clear-Host; exit 0 }
+            'Q'         {
+                if (Confirm-Quit) { Clear-Host; exit 0 }
+                Draw-All
+            }
         }
         } catch {
             try {
