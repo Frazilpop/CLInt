@@ -869,6 +869,13 @@ $form.Add_KeyDown({
         'B'          { Step-Audio }
         'PageUp'     { Step-Episode -1 }
         'PageDown'   { Step-Episode 1 }
+        # Media keys, as sent by remotes (Remote Helper's pause button among
+        # them) and the media row on most keyboards. They arrive as ordinary
+        # KeyDowns on the focused window, so cases here are all it takes.
+        'MediaPlayPause'     { Toggle-Pause }
+        'MediaStop'          { Stop-Player }
+        'MediaPreviousTrack' { Step-Episode -1 }
+        'MediaNextTrack'     { Step-Episode 1 }
         'Tab'        { $script:osdPinned = -not $script:osdPinned
                        if ($script:osdPinned) { Show-Osd '' 600000 } else { $script:osdUntil = 0; $osd.Hide() } }
         'Enter'      { Toggle-Pause }
