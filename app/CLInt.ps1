@@ -618,6 +618,7 @@ public static extern bool GetConsoleDisplayMode(out uint flags);
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
 [DllImport("user32.dll")] public static extern bool ShowScrollBar(IntPtr h, int bar, bool show);
+[DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
 '@
 } catch {}
 
@@ -627,10 +628,25 @@ public static extern bool GetConsoleDisplayMode(out uint flags);
 # the bar just lingers, dead, sometimes with the window style bits already
 # cleared (so gating on GetWindowLong misses it). Hide unconditionally:
 # ShowScrollBar(off) is cheap and a no-op when no bar exists.
-function Hide-Scrollbars {
+#
+# Removing a bar is not enough, though: nothing repaints the strip of
+# pixels it covered, and on the fullscreen surface nothing else ever
+# invalidates that strip - the IMAGE of the bar lingers as a ghost that
+# no scrollbar API can touch, because there is no scrollbar any more
+# (seen live: style bits clear, buffer pinned, bar still on screen; a
+# forced window repaint was what finally erased it). So repaint after
+# actually removing a bar, and -Repaint forces one at the transitions
+# where a ghost can be born with the style bits already cleared.
+function Hide-Scrollbars([switch]$Repaint) {
     try {
         $h = [CLI.Native]::GetConsoleWindow()
+        $had = [CLI.Native]::GetWindowLong($h, -16) -band 0x00300000    # WS_HSCROLL | WS_VSCROLL
         [CLI.Native]::ShowScrollBar($h, 3, $false) | Out-Null   # SB_BOTH
+        if ($Repaint -or $had -ne 0) {
+            # RDW_INVALIDATE | RDW_ERASE | RDW_FRAME - conhost repaints the
+            # whole surface from its own buffer, ghost strips included.
+            [CLI.Native]::RedrawWindow($h, [IntPtr]::Zero, [IntPtr]::Zero, 0x405) | Out-Null
+        }
     } catch {}
 }
 
@@ -671,7 +687,7 @@ function Set-ConsoleFullscreen {
         } catch {}
         $ws = $Host.UI.RawUI.WindowSize
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
-        Hide-Scrollbars
+        Hide-Scrollbars -Repaint
         $script:isFullscreen = $true
     } catch {}
 }
@@ -690,7 +706,7 @@ function Set-ConsoleWindowed {
             $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
         } catch {}
-        Hide-Scrollbars
+        Hide-Scrollbars -Repaint
         $script:isFullscreen = $false
     } catch {}
 }
@@ -796,6 +812,10 @@ function Show-MenuWindow {
             Set-ConsoleFullscreen
         }
     } catch {}
+    # Coming back from a game or video is a display transition too - a
+    # resolution change while the console was covered can strand a ghost
+    # scrollbar strip. Come back to a freshly painted surface.
+    Hide-Scrollbars -Repaint
 }
 
 # Minimizing the console while conhost's fullscreen display mode is on
