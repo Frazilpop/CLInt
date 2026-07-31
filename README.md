@@ -21,7 +21,8 @@ A minimalist interface with configurable tabs to load the following:
   tracking the game by its target exe.
 - **VIDEOS** — a folder browser that plays video files, in CLInt's own
   player or whatever you normally use. Half-watched videos are remembered
-  and rise to the top.
+  and rise to the top, and finishing an episode queues the folder's next
+  one under UP NEXT. Both sections can be turned off in Video settings.
 - **SETTINGS** — deep app customisation,
   persisted to `data\settings.json`.
   

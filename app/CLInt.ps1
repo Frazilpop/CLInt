@@ -1380,6 +1380,10 @@ function Record-Play($game) {
 # same VLC state, so it stands on its own with video history switched off.
 $videoHistEnabled = $settings['VideoHistory']     -ne $false
 $watchingEnabled  = $settings['CurrentlyWatching'] -ne $false
+# UP NEXT: the episode after the one a folder last saw finished. It is
+# built from the play counts, so it follows VideoHistory's toggle as
+# well as its own - no history, no way to know what was finished.
+$upNextEnabled    = $settings['UpNext']            -ne $false
 # The built-in player's bottom row of button hints. On by default - the
 # player takes a controller and nothing else says what the buttons do -
 # but once they are known they are just a row of text over the film, so
@@ -1617,39 +1621,118 @@ $builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -ne 'default')
 # same video would follow you around. VLC drops a file from this list the
 # moment it plays to the end, so the section empties itself with no
 # bookkeeping of ours.
-function Add-WatchingSection($t, $list, $entries) {
-    if (-not $script:watchingEnabled -or $entries.Count -eq 0) { return @($list) }
+#
+# UP NEXT is the companion section for what was watched to the END: a
+# folder stands in for a show, and the video after the folder's most
+# recently finished one (same A-Z order as the browser) is the episode
+# you'd reach for next. Play counts only record on completion, so the
+# watch history IS the list of finished episodes. A folder holding a
+# part-watched video contributes nothing - the thing to offer there is
+# the CURRENTLY WATCHING row, not the episode after it - which is also
+# why one show can sit in CURRENTLY WATCHING while another's next
+# episode waits in UP NEXT. Finishing the last file of a folder simply
+# retires the folder from the section.
+function Add-VideoSections($t, $list, $entries) {
     if (-not $t.Root -or $t.Dir -ne $t.Root) { return @($list) }
     $prefix = $t.Root.TrimEnd('\') + '\'
     $watching = @(); $taken = @{}
-    foreach ($e in $entries) {
-        if (-not $e.Path.StartsWith($prefix, 'OrdinalIgnoreCase')) { continue }   # another tab's folder
-        if ([System.IO.Path]::GetExtension($e.Path) -notmatch $script:videoExtRe) { continue }
-        # VLC remembers a path long after the file moved, was deleted, or
-        # went away with the drive it lived on - never list a dead row.
-        if (-not (Test-Path -LiteralPath $e.Path -PathType Leaf)) { continue }
-        $k = $e.Path.ToLower()
-        $plays = 0
-        if ($script:videoHistEnabled -and $script:watchMap[$k]) {
-            try { $plays = [int]$script:watchMap[$k].Plays } catch {}
+    if ($script:watchingEnabled) {
+        foreach ($e in $entries) {
+            if (-not $e.Path.StartsWith($prefix, 'OrdinalIgnoreCase')) { continue }   # another tab's folder
+            if ([System.IO.Path]::GetExtension($e.Path) -notmatch $script:videoExtRe) { continue }
+            # VLC remembers a path long after the file moved, was deleted, or
+            # went away with the drive it lived on - never list a dead row.
+            if (-not (Test-Path -LiteralPath $e.Path -PathType Leaf)) { continue }
+            $k = $e.Path.ToLower()
+            $plays = 0
+            if ($script:videoHistEnabled -and $script:watchMap[$k]) {
+                try { $plays = [int]$script:watchMap[$k].Plays } catch {}
+            }
+            $watching += [pscustomobject]@{
+                Name = [System.IO.Path]::GetFileName($e.Path); Path = $e.Path; Type = 'File'
+                Plays = $plays; Resume = $e.Seconds; Watching = $true
+            }
+            $taken[$k] = $true
         }
-        $watching += [pscustomobject]@{
-            Name = [System.IO.Path]::GetFileName($e.Path); Path = $e.Path; Type = 'File'
-            Plays = $plays; Resume = $e.Seconds; Watching = $true
-        }
-        $taken[$k] = $true
     }
-    if ($watching.Count -eq 0) { return @($list) }
+    $upNext = @()
+    if ($script:upNextEnabled -and $script:videoHistEnabled -and $script:watchMap.Count -gt 0) {
+        # Folders with a live half-watched video are continue-watching
+        # territory, whatever the CurrentlyWatching toggle says - collect
+        # them first so their next episode is never suggested over the
+        # resume. A resume entry whose file is gone doesn't count: there
+        # is nothing left to continue.
+        $partial = @{}
+        foreach ($e in $entries) {
+            if (-not $e.Path.StartsWith($prefix, 'OrdinalIgnoreCase')) { continue }
+            if ([System.IO.Path]::GetExtension($e.Path) -notmatch $script:videoExtRe) { continue }
+            if (-not (Test-Path -LiteralPath $e.Path -PathType Leaf)) { continue }
+            $partial[([System.IO.Path]::GetDirectoryName($e.Path)).ToLower()] = $true
+        }
+        # Each folder's most recently finished video, by the watch map's
+        # Last stamp. Keys are already lower-cased full paths.
+        $latest = @{}
+        foreach ($k in @($script:watchMap.Keys)) {
+            if (-not $k.StartsWith($prefix, 'OrdinalIgnoreCase')) { continue }
+            if ([System.IO.Path]::GetExtension($k) -notmatch $script:videoExtRe) { continue }
+            $d = [System.IO.Path]::GetDirectoryName($k)
+            if ($partial[$d]) { continue }
+            $when = [DateTime]::MinValue
+            try { $when = [DateTime]$script:watchMap[$k].Last } catch {}
+            if (-not $latest[$d] -or $when -gt $latest[$d].When) {
+                $latest[$d] = [pscustomobject]@{ Name = [System.IO.Path]::GetFileName($k); When = $when }
+            }
+        }
+        # Newest shows first, capped so a long backlog of finished shows
+        # can't push the browser off the screen. The finished file itself
+        # only needs to have EXISTED - deleting watched episodes is normal
+        # housekeeping, and its name still orders the folder's survivors.
+        foreach ($d in @($latest.Keys | Sort-Object { $latest[$_].When } -Descending)) {
+            if ($upNext.Count -ge 5) { break }
+            $next = $null
+            foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+                if ($f.Name.StartsWith('.')) { continue }
+                if ($f.Extension -notmatch $script:videoExtRe) { continue }
+                if ($f.Name -le $latest[$d].Name) { continue }
+                $next = $f; break
+            }
+            if (-not $next -or $taken[$next.FullName.ToLower()]) { continue }
+            # $d came out of a lower-cased watch key, and Get-ChildItem hands
+            # that casing straight back in FullName. Only the parent folder's
+            # name is ever shown (the collision rows below), so put its real
+            # casing back and let the deeper segments stay as they are.
+            try {
+                $gp = $next.Directory.Parent
+                if ($gp) {
+                    $hit = @($gp.GetDirectories($next.Directory.Name))
+                    if ($hit.Count -eq 1) {
+                        $next = [System.IO.FileInfo](Join-Path $hit[0].FullName $next.Name)
+                    }
+                }
+            } catch {}
+            $k = $next.FullName.ToLower()
+            $plays = 0
+            if ($script:watchMap[$k]) { try { $plays = [int]$script:watchMap[$k].Plays } catch {} }
+            $upNext += [pscustomobject]@{
+                Name = $next.Name; Path = $next.FullName; Type = 'File'
+                Plays = $plays; Resume = $null
+            }
+            $taken[$k] = $true
+        }
+    }
+    if ($watching.Count -eq 0 -and $upNext.Count -eq 0) { return @($list) }
     # Names alone can collide - "Show\Season 1\01.mkv" and "Season 2\01.mkv"
     # both come through as "01.mkv", and two identical rows are worse than
     # one long one. Only the colliding rows get their folder back, so the
-    # ordinary case stays a bare file name.
+    # ordinary case stays a bare file name. Checked across both sections:
+    # The Wire's resume row and its up-next row collide just as readily.
+    $lifted = @($watching) + @($upNext)
     $seen = @{}
-    foreach ($w in $watching) {
+    foreach ($w in $lifted) {
         $n = $w.Name.ToLower()
         $seen[$n] = 1 + [int]$seen[$n]
     }
-    foreach ($w in $watching) {
+    foreach ($w in $lifted) {
         if ($seen[$w.Name.ToLower()] -gt 1) {
             # NOT Split-Path: -LiteralPath and -Parent are different parameter
             # sets in PS 5.1 and throw together, and plain -Path would read a
@@ -1661,8 +1744,16 @@ function Add-WatchingSection($t, $list, $entries) {
     # Lifted, not copied: a root-level video listed above must not show up
     # again in the A-Z rows below it.
     $rest = @($list | Where-Object { $_.Type -ne 'File' -or -not $taken[$_.Path.ToLower()] })
-    $out = @([pscustomobject]@{ Name = 'CURRENTLY WATCHING'; Unselectable = $true })
-    $out += $watching
+    $out = @()
+    if ($watching.Count -gt 0) {
+        $out += [pscustomobject]@{ Name = 'CURRENTLY WATCHING'; Unselectable = $true }
+        $out += $watching
+    }
+    if ($upNext.Count -gt 0) {
+        if ($out.Count -gt 0) { $out += [pscustomobject]@{ Name = ''; Unselectable = $true } }   # blank spacer row
+        $out += [pscustomobject]@{ Name = 'UP NEXT'; Unselectable = $true }
+        $out += $upNext
+    }
     if ($rest.Count -gt 0) {
         $out += [pscustomobject]@{ Name = '';       Unselectable = $true }   # blank spacer row
         $out += [pscustomobject]@{ Name = 'BROWSE'; Unselectable = $true }
@@ -1705,7 +1796,7 @@ function Get-FileItems($t) {
                 Plays = $plays; Resume = $vlcResume[$k]
             }
         })
-    return @(Add-WatchingSection $t $list $resumeEntries)
+    return @(Add-VideoSections $t $list $resumeEntries)
 }
 
 # ---------------------------------------------------------------- Tabs ---
@@ -1820,6 +1911,12 @@ function Get-VideoSettingsItems {
                                 Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Watching'
                                 Name = ('Currently watching first'.PadRight(30) + $(if ($script:watchingEnabled) { 'on' } else { 'off' })) }
+    # UP NEXT is built from the play counts, so while video history is
+    # off it would be a toggle that does nothing - hidden rather than dead.
+    if ($script:videoHistEnabled) {
+        $list += [pscustomobject]@{ Key = 'UpNext'
+                                    Name = ('Up next'.PadRight(30) + $(if ($script:upNextEnabled) { 'on' } else { 'off' })) }
+    }
     if (-not $script:vlcExe) {
         $list += [pscustomobject]@{ Key = 'VlcInfo'
                                     Name = 'VLC not detected - videos will open in the default player' }
@@ -1845,7 +1942,7 @@ function Get-SettingsItems {
     $list += [pscustomobject]@{ Key = 'GameSettings'
                                 Name = ('Game settings'.PadRight(30) + 'Steam library, recently played') }
     $list += [pscustomobject]@{ Key = 'VideoSettings'
-                                Name = ('Video settings'.PadRight(30) + 'player, history, currently watching') }
+                                Name = ('Video settings'.PadRight(30) + 'player, history, currently watching, up next') }
     $list += [pscustomobject]@{ Key = 'Fullscreen'; Name = 'Toggle fullscreen' }
     $list += [pscustomobject]@{ Key = 'ShowClock'
                                 Name = ('Show clock'.PadRight(30) + $(if ($script:showClock) { 'on' } else { 'off' })) }
@@ -3047,6 +3144,12 @@ function Invoke-SettingsAction([string]$key) {
             $settings['CurrentlyWatching'] = $script:watchingEnabled
             Save-Settings
             Build-Tabs   # apply or undo the CURRENTLY WATCHING section
+        }
+        'UpNext' {
+            $script:upNextEnabled = -not $script:upNextEnabled
+            $settings['UpNext'] = $script:upNextEnabled
+            Save-Settings
+            Build-Tabs   # apply or undo the UP NEXT section
         }
         'VlcInfo' {
             $script:pendingNotice = 'With VLC (videolan.org): fullscreen playback, the menu returns when a video ends, and resume markers work.'
