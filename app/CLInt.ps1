@@ -613,6 +613,8 @@ public struct CONSOLE_FONT_INFOEX {
 public static extern bool SetCurrentConsoleFontEx(IntPtr hOut, bool max, ref CONSOLE_FONT_INFOEX info);
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool SetConsoleDisplayMode(IntPtr hOut, uint flags, out int coords);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleDisplayMode(out uint flags);
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
 [DllImport("user32.dll")] public static extern bool ShowScrollBar(IntPtr h, int bar, bool show);
@@ -711,6 +713,7 @@ try {
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
     # Hosts other than conhost (Windows Terminal above all) hand back a
@@ -783,6 +786,54 @@ function Show-MenuWindow {
     }
     # AppActivate by OWN PID, never by title - other consoles can share it.
     try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
+    # A restore can land the window at the minimize PARKING coordinates
+    # (-21333,-21333 on this box), "restored" yet off every monitor - see
+    # Repair-MenuWindow for how conhost gets there. Re-entering fullscreen
+    # mode both repositions the window and repairs the placement it saved.
+    try {
+        if (-not [CLIntFocus.Win]::IsIconic($script:conHwnd) -and
+            [CLIntFocus.Win]::MonitorFromWindow($script:conHwnd, 0) -eq [IntPtr]::Zero) {   # MONITOR_DEFAULTTONULL
+            Set-ConsoleFullscreen
+        }
+    } catch {}
+}
+
+# Minimizing the console while conhost's fullscreen display mode is on
+# poisons its restore state (measured live, v1.2.11): the first taskbar
+# click is EATEN - conhost drops out of fullscreen mode but stays
+# minimized (the icon just flickers) - and the next restore, from any
+# path, parks the window at the minimize coordinates and then saves
+# those as its normal placement, so it is alive, "restored", and
+# invisible forever. The hotkey never hit this because SW_RESTORE while
+# the mode is still fullscreen makes conhost reassert the fullscreen
+# rect; only the taskbar's SC_RESTORE corrupts. Called from the idle
+# tick in Read-InputKey, so both poison stages self-heal within ~300ms:
+# a minimized-in-fullscreen menu whose mode flips off while still
+# minimized can only mean a taskbar click was eaten - finish the
+# restore it asked for. A minimized window reports the monitor of its
+# restore position, so the off-screen check can't misfire on a normal
+# minimize.
+$script:fsWhileIconic = $false
+function Repair-MenuWindow {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    try {
+        if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) {
+            $mode = [uint32]0
+            [CLI.Native]::GetConsoleDisplayMode([ref]$mode) | Out-Null
+            if ($mode -band 1) { $script:fsWhileIconic = $true }
+            elseif ($script:fsWhileIconic) {
+                $script:fsWhileIconic = $false
+                Show-MenuWindow        # restore + focus; its off-screen check
+                Set-ConsoleFullscreen  # may have run, but this pins the mode
+            }
+        } else {
+            $script:fsWhileIconic = $false
+            if ([CLIntFocus.Win]::MonitorFromWindow($script:conHwnd, 0) -eq [IntPtr]::Zero) {
+                Set-ConsoleFullscreen
+                Show-MenuWindow
+            }
+        }
+    } catch {}
 }
 
 # Pin the menu above everything else, or let it back down again.
@@ -2452,6 +2503,11 @@ function Read-InputKey {
         # keypress triggered a redraw. Re-pin the buffer promptly instead.
         if ([Environment]::TickCount -ge $script:bufferCheckNext) {
             $script:bufferCheckNext = [Environment]::TickCount + 300
+            # First, undo any minimize/restore damage (an eaten taskbar
+            # click, a window restored off-screen): a heal changes the
+            # console size, and the resize check just below then redraws
+            # in this same tick.
+            Repair-MenuWindow
             $resized = $false
             try {
                 $cw = [Console]::WindowWidth
