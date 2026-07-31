@@ -1634,6 +1634,21 @@ $builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -ne 'default')
 # why one show can sit in CURRENTLY WATCHING while another's next
 # episode waits in UP NEXT. Finishing the last file of a folder simply
 # retires the folder from the section.
+function Get-EpisodeStem($name) {
+    # Episodes of one show differ from each other only by number - strip
+    # the digit runs and they collapse to the same stem, while a folder of
+    # movies yields a different stem per file. That difference is what
+    # keeps a movies folder out of UP NEXT; a numbered collection ("Alien
+    # 1", "Alien 2") still matches, so those sequels queue like episodes.
+    # (An UNnumbered first film never queues its sequel anyway: culture
+    # sort puts "Die Hard 2.mkv" before "Die Hard.mkv", so the sequel is
+    # not "after" the finished film - pre-existing A-Z rule, not this.)
+    # Whitespace is collapsed and trimmed so the leftover separator around
+    # a stripped number ("Die Hard" vs "Die Hard 2 ") can't split a stem.
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '\d+', ''
+    return ($stem -replace '\s+', ' ').Trim().ToLower()
+}
+
 function Add-VideoSections($t, $list, $entries) {
     if (-not $t.Root -or $t.Dir -ne $t.Root) { return @($list) }
     $prefix = $t.Root.TrimEnd('\') + '\'
@@ -1692,10 +1707,16 @@ function Add-VideoSections($t, $list, $entries) {
         foreach ($d in @($latest.Keys | Sort-Object { $latest[$_].When } -Descending)) {
             if ($upNext.Count -ge 5) { break }
             $next = $null
+            $finishedStem = Get-EpisodeStem $latest[$d].Name
             foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
                 if ($f.Name.StartsWith('.')) { continue }
                 if ($f.Extension -notmatch $script:videoExtRe) { continue }
                 if ($f.Name -le $latest[$d].Name) { continue }
+                # Only another episode of the same show qualifies - in a
+                # movies folder nothing shares the finished film's stem, so
+                # no candidate survives and the folder never queues. A miss
+                # is invisible; a wrong suggestion is noticed.
+                if ((Get-EpisodeStem $f.Name) -ne $finishedStem) { continue }
                 $next = $f; break
             }
             if (-not $next -or $taken[$next.FullName.ToLower()]) { continue }
