@@ -1315,6 +1315,34 @@ $playtimeEnabled = $settings['Playtime']        -ne $false
 $autoCheck       = $settings['AutoUpdateCheck'] -eq $true
 $mouseEnabled    = $settings['Mouse']           -ne $false
 $hoverTabs       = $settings['HoverTabs']       -eq $true
+
+# --- Launch at startup (SETTINGS toggle, off unless turned on) ----------
+# An HKCU Run entry, not a Startup-folder shortcut, for the same reason
+# the hotkey's logon entry is one (see Install.ps1): GetFolderPath can
+# hand back '' for the Startup folder. The entry itself is the setting -
+# nothing in settings.json - so the row always shows what Windows will
+# actually do at sign-in, and a settings reset leaves it alone just like
+# the hotkey's entry.
+$autoStartRunKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$autoStartRunName = 'CLInt'
+function Register-AutoStart {
+    # Same invocation as the desktop shortcut: Launch.ps1 under a hidden
+    # powershell, which starts conhost fullscreen and foregrounds it.
+    $cmd = "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $script:rootDir 'Launch.ps1')`""
+    if (-not (Test-Path $script:autoStartRunKey)) { New-Item $script:autoStartRunKey -Force | Out-Null }
+    Set-ItemProperty $script:autoStartRunKey -Name $script:autoStartRunName -Value $cmd
+}
+function Unregister-AutoStart {
+    Remove-ItemProperty $script:autoStartRunKey -Name $script:autoStartRunName -Force -ErrorAction SilentlyContinue
+}
+$autoStart = $null -ne (Get-ItemProperty $autoStartRunKey -Name $autoStartRunName -ErrorAction SilentlyContinue)
+# A moved CLInt folder would leave the entry aimed at the old path, so
+# re-assert the current one while the toggle is on. Gated on Launch.ps1
+# actually being there: the flat test-harness copy has none, and must
+# never rewrite the real machine's entry to point at itself.
+if ($autoStart -and (Test-Path (Join-Path $script:rootDir 'Launch.ps1'))) {
+    try { Register-AutoStart } catch {}
+}
 $inModal = $false        # modals suppress the idle clock/battery repaint
 $batteryPct = -1
 $batteryNext = 0
@@ -1825,6 +1853,8 @@ function Get-SettingsItems {
                                 Name = ('Show battery'.PadRight(30) + $(if ($script:showBattery) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'AutoCheck'
                                 Name = ('Check updates at launch'.PadRight(30) + $(if ($script:autoCheck) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'AutoStart'
+                                Name = ('Launch at startup'.PadRight(30) + $(if ($script:autoStart) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Mouse'
                                 Name = ('Mouse support'.PadRight(30) + $(if ($script:mouseEnabled) { 'on' } else { 'off' })) }
     # Only worth showing while the mouse is on - otherwise it is a toggle
@@ -3757,6 +3787,17 @@ try {
                             $script:autoCheck = -not $script:autoCheck
                             $settings['AutoUpdateCheck'] = $script:autoCheck
                             Save-Settings
+                        }
+                        'AutoStart' {
+                            # The registry entry is the state: flip it there
+                            # first, and only show the row changed if Windows
+                            # took the write.
+                            try {
+                                if ($script:autoStart) { Unregister-AutoStart } else { Register-AutoStart }
+                                $script:autoStart = -not $script:autoStart
+                            } catch {
+                                $script:pendingNotice = 'Windows would not save the startup entry'
+                            }
                         }
                         'Mouse' {
                             $script:mouseEnabled = -not $script:mouseEnabled

@@ -117,6 +117,14 @@ it entirely is fine; the desktop shortcut does the same job.
 Press it and nothing happens? **SETTINGS → Menu key** shows whether it is
 bound; the tray icon's tooltip names the key too.
 
+## Launch at startup
+
+**SETTINGS → Launch at startup** (off by default) opens CLInt by itself
+when you sign in to Windows. The desktop still shows for a few seconds
+while Windows finishes starting up — then CLInt takes the screen.
+Turning the toggle off removes the startup entry again, as does
+uninstalling.
+
 ## Updating
 
 **SETTINGS → Check for updates**, then press A. Git installs update via

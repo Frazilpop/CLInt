@@ -94,6 +94,10 @@ if ((Get-ItemProperty $runKey -Name 'CLIntKey' -ErrorAction SilentlyContinue)) {
     Remove-ItemProperty $runKey -Name 'CLIntKey' -Force
     Write-Host "  Removed: Startup hotkey entry" -ForegroundColor Green
 }
+if ((Get-ItemProperty $runKey -Name 'CLInt' -ErrorAction SilentlyContinue)) {
+    Remove-ItemProperty $runKey -Name 'CLInt' -Force
+    Write-Host "  Removed: launch-at-startup entry" -ForegroundColor Green
+}
 
 # --- 3. Personal data (optional) ---------------------------------------
 # Settings, histories, per-game TDP, the hotkey binding, error log - the
