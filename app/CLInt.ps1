@@ -916,9 +916,10 @@ function Hide-MenuWindow {
 # for the rare run where the game never took the screen at all.
 function Draw-LandingScreen($g, [DateTime]$t0) {
     $mins = [int][Math]::Floor(([DateTime]::Now - $t0).TotalMinutes)
-    $dur  = if ($mins -ge 60)    { "played for $([Math]::Floor($mins / 60))h $($mins % 60)m" }
-            elseif ($mins -ge 1) { "played for $mins min" }
-            else                 { '' }
+    $dur  = if (-not $script:sessionTimeOn) { '' }
+            elseif ($mins -ge 60) { "played for $([Math]::Floor($mins / 60))h $($mins % 60)m" }
+            elseif ($mins -ge 1)  { "played for $mins min" }
+            else                  { '' }
     Clear-Host
     Write-Host ""
     Write-Host "      _" -ForegroundColor $theme.Accent
@@ -1312,6 +1313,7 @@ $showClock       = $settings['ShowClock']       -ne $false
 $showBattery     = $settings['ShowBattery']     -ne $false
 $recentEnabled   = $settings['Recent']          -ne $false
 $playtimeEnabled = $settings['Playtime']        -ne $false
+$sessionTimeOn   = $settings['SessionTime']     -ne $false
 $autoCheck       = $settings['AutoUpdateCheck'] -eq $true
 $mouseEnabled    = $settings['Mouse']           -ne $false
 $hoverTabs       = $settings['HoverTabs']       -eq $true
@@ -1887,6 +1889,8 @@ function Get-GameSettingsItems {
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Playtime'
                                 Name = ('Steam playtime tag'.PadRight(30) + $(if ($script:playtimeEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'SessionTime'
+                                Name = ('Time played on return'.PadRight(30) + $(if ($script:sessionTimeOn) { 'on' } else { 'off' })) }
     return $list
 }
 
@@ -3110,6 +3114,12 @@ function Invoke-SettingsAction([string]$key) {
             Save-Settings
             # The tag is stamped by Draw-GameLine every frame, so there is
             # no tab to rebuild - the next paint already has it right.
+        }
+        'SessionTime' {
+            $script:sessionTimeOn = -not $script:sessionTimeOn
+            $settings['SessionTime'] = $script:sessionTimeOn
+            Save-Settings
+            # Read by Draw-LandingScreen at the next WELCOME BACK.
         }
         'VideoPlayer' {
             if (-not $script:playerHost) {
