@@ -73,8 +73,9 @@ Fullscreen and controller-driven: A pauses, B returns to CLInt, the D-pad
 seeks and sets volume (up to 150%), X cycles subtitles, Y audio tracks,
 and LB/RB step through the folder's other episodes. It remembers where you
 stopped. The menu key works mid-film too: press it to pause and put CLInt
-away, press it again to bring the film back. A double-click (or
-double-tap) on the picture also returns to CLInt.
+away, press it again to bring the film back — as does clicking CLInt on
+the taskbar. A double-click (or double-tap) on the picture also returns
+to CLInt.
 
 Subtitles start off. **SETTINGS → Video settings → Subtitles on by
 default** turns them on, and works both for an `.srt` sitting beside the

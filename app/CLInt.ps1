@@ -4095,6 +4095,8 @@ try {
                             $wrapSb = { Draw-WrapScreen $v.Name }.GetNewClosure()
                             $wt0 = [DateTime]::Now
                             $lastLand = -1
+                            $pwnd     = [IntPtr]::Zero   # the player's window, once announced
+                            $conWasIc = $false           # console iconic on the previous tick
                             while (-not $proc.HasExited) {
                                 # Same pre-paint trick the game path uses: while
                                 # the player covers the console, paint the wrap
@@ -4107,6 +4109,36 @@ try {
                                         try { & $wrapSb; $lastLand = $lm; $script:landingPainted = $true } catch {}
                                     }
                                 }
+                                # The menu key puts the player and this console
+                                # away together, and the player keeps itself out
+                                # of the taskbar - so the one button left down
+                                # there is the console's, and clicking it must
+                                # bring the FILM back. Two problems stand in the
+                                # way: conhost eats a taskbar restore taken while
+                                # its fullscreen mode is on (see Repair-MenuWindow,
+                                # whose idle-tick self-heal is not running - this
+                                # loop is where the script is), and restoring the
+                                # console alone would only expose a deaf wrap
+                                # screen. So run the repair here too, and treat
+                                # the console coming back from minimized - which
+                                # mid-film can only be the user at the taskbar -
+                                # as the ask to hand the screen to the player.
+                                try {
+                                    Repair-MenuWindow
+                                    $conIc = [CLIntFocus.Win]::IsIconic($script:conHwnd)
+                                    if ($conWasIc -and -not $conIc) {
+                                        if ($pwnd -eq [IntPtr]::Zero -and (Test-Path $playerHwnd)) {
+                                            $pwnd = [IntPtr][int64]((Get-Content $playerHwnd -Raw).Trim())
+                                        }
+                                        if ($pwnd -ne [IntPtr]::Zero -and [CLIntFocus.Win]::IsWindow($pwnd)) {
+                                            if ([CLIntFocus.Win]::IsIconic($pwnd)) {
+                                                [CLIntFocus.Win]::ShowWindow($pwnd, 9) | Out-Null   # SW_RESTORE
+                                            }
+                                            [CLIntFocus.Win]::SetForegroundWindow($pwnd) | Out-Null
+                                        }
+                                    }
+                                    $conWasIc = $conIc
+                                } catch {}
                                 Start-Sleep -Milliseconds 300
                             }
                             Remove-Item $playerHwnd -Force -ErrorAction SilentlyContinue
