@@ -3413,7 +3413,17 @@ function Show-VideoMenu($v) {
         foreach ($e in (Get-ResumeEntries)) {
             if ($e.Path.ToLower() -eq $k) { $resume = [int]$e.Seconds; break }
         }
-        $opts = @('Play count + 1'); $acts = @('inc')
+        $opts = @(); $acts = @()
+        # The one-press answer for a half-watched video: "I did watch this."
+        # A play recorded as of now plus the partial position cleared - the
+        # same pair of writes a watch that ends in the player makes, so the
+        # sections react identically: out of CURRENTLY WATCHING, the next
+        # episode into UP NEXT. First in the list because on a row wearing
+        # a [>>] tag it is the reason the menu was opened.
+        if ($resume -gt 0) {
+            $opts += 'Mark as completed'; $acts += 'complete'
+        }
+        $opts += 'Play count + 1'; $acts += 'inc'
         if ($plays -gt 0) {
             $opts += 'Play count - 1';        $acts += 'dec'
             $opts += 'Reset play count to 0'; $acts += 'zero'
@@ -3427,6 +3437,9 @@ function Show-VideoMenu($v) {
         $c = Pick-Option "$([string]$v.Name)  --  played $plays" $opts
         if ($c -lt 0 -or $acts[$c] -eq 'done') { break }
         switch ($acts[$c]) {
+            # Record-VideoPlay, not Set-VideoPlays: Last must say NOW, so
+            # UP NEXT orders this folder as freshly watched.
+            'complete' { Record-VideoPlay $path; Set-Resume $path 0 }
             'inc'  { Set-VideoPlays $path ($plays + 1) }
             'dec'  { Set-VideoPlays $path ($plays - 1) }
             'zero' { Set-VideoPlays $path 0 }

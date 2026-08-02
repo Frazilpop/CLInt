@@ -112,7 +112,9 @@ whatever is highlighted.
 
 Steam games can be uninstalled from here, without leaving CLInt. Videos get
 their play count changed — up, down, or back to zero — and a part-watched
-one can have its resume position cleared.
+one can be marked as completed (a play is recorded and the resume position
+cleared, so the next episode queues under UP NEXT) or just have its resume
+position cleared.
 
 ## HotKey
 
