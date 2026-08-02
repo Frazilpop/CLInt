@@ -46,7 +46,11 @@ param(
     # Absent means off: a file carrying a subtitle track is not a reason to
     # put it on screen. Either way X cycles them by hand during playback.
     [switch]$Subtitles,
-    [int]$Volume = 100                # starting volume, in percent (see $VOL_MAX)
+    [int]$Volume = 100,               # starting volume, in percent (see $VOL_MAX)
+    # Past this percentage of the file, stopping still counts as a full
+    # watch (SETTINGS -> Video settings) - nobody owes the credits a
+    # viewing. 100 keeps the strict rule: only the last half-minute counts.
+    [int]$WatchedPct = 100
 )
 
 $ErrorActionPreference = 'Stop'
@@ -319,10 +323,17 @@ function Save-State {
 # A video within half a minute of its end is a video that was watched: VLC
 # drops its own resume entry at that point too, so CLInt's [>>] tag and the
 # CURRENTLY WATCHING section agree whichever player wrote the state.
+# WatchedPct widens that: credits are part of the file but not part of the
+# watch, so stopping past (say) 95% counts too. Min of the two marks, so
+# the half-minute rule still catches a short video whose credits window
+# would be only seconds wide - and at 100 it IS the old rule, unchanged.
 function Record-Position {
     if (-not $script:current) { return }
     $done = $false
-    if ($script:lastLen -gt 0 -and $script:lastTime -ge ($script:lastLen - 30)) { $done = $true }
+    if ($script:lastLen -gt 0) {
+        $mark = [Math]::Min($script:lastLen - 30, $script:lastLen * $WatchedPct / 100.0)
+        if ($script:lastTime -ge $mark) { $done = $true }
+    }
     # Last is what orders CURRENTLY WATCHING back in CLInt, and it is also
     # how CLInt tells which file a multi-episode run stopped on.
     $script:results[$script:current] = @{

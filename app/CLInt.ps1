@@ -1416,6 +1416,19 @@ $playerHints      = $settings['PlayerHints']       -ne $false
 # put it on screen - and note the default is the opposite way round to the
 # toggles above, so this one tests for $true rather than -ne $false.
 $subtitlesOn      = $settings['Subtitles']         -eq $true
+# Where a watch starts counting as complete, as a percentage of the file.
+# Nobody sits through the credits: TV credits start around 96-98% of an
+# episode, films and anime EDs nearer 92-95%, so 95 catches "stopped when
+# the credits rolled" without swallowing a real early bail. 100 keeps the
+# strict only-the-very-end rule. Honoured by the built-in player, which
+# knows the file's length; the other paths have no duration to compare.
+$watchedPctOpts = @(90, 95, 98, 100)
+$watchedPct = 95
+try {
+    if ($watchedPctOpts -contains [int]$settings['WatchedPercent']) {
+        $watchedPct = [int]$settings['WatchedPercent']
+    }
+} catch {}
 $watchFile = Join-Path $script:dataDir 'watch-history.json'
 $watchMap = @{}
 if (Test-Path $watchFile) {
@@ -1951,6 +1964,10 @@ function Get-VideoSettingsItems {
         $list += [pscustomobject]@{ Key = 'Subtitles'
                                     Name = ('Subtitles on by default'.PadRight(30) +
                                             $(if ($script:subtitlesOn) { 'on' } else { 'off' })) }
+        # Only the built-in player knows a file's length, so only it can
+        # honour this - shown under its row for the same reason as above.
+        $list += [pscustomobject]@{ Key = 'WatchedAt'
+                                    Name = ('Counts as watched at'.PadRight(30) + "$($script:watchedPct)%") }
     }
     $list += [pscustomobject]@{ Key = 'VideoHist'
                                 Name = ('Video history'.PadRight(30) + $(if ($script:videoHistEnabled) { 'on' } else { 'off' })) }
@@ -3184,6 +3201,19 @@ function Invoke-SettingsAction([string]$key) {
             $settings['Subtitles'] = $script:subtitlesOn
             Save-Settings
         }
+        'WatchedAt' {
+            # A steps through the few values that make sense, the way a
+            # toggle steps through two - no picker for four numbers.
+            $i = [array]::IndexOf($script:watchedPctOpts, $script:watchedPct)
+            $script:watchedPct = $script:watchedPctOpts[($i + 1) % $script:watchedPctOpts.Count]
+            $settings['WatchedPercent'] = $script:watchedPct
+            Save-Settings
+            $script:pendingNotice = if ($script:watchedPct -eq 100) {
+                'Only a video played right to the end counts as watched.'
+            } else {
+                "Stopping after $($script:watchedPct)% of a video now counts as a full watch."
+            }
+        }
         'VideoHist' {
             $script:videoHistEnabled = -not $script:videoHistEnabled
             $settings['VideoHistory'] = $script:videoHistEnabled
@@ -4074,6 +4104,7 @@ try {
                             '-Theme',     (Get-ThemeRgbArg)
                             '-TextPx',    [string]$textSizes[$script:textSizeName]
                             '-Controls',  $script:controlHints
+                            '-WatchedPct', [string]$script:watchedPct
                         )
                         if (-not $script:playerHints) { $pargs += '-NoHints' }
                         if ($script:subtitlesOn)      { $pargs += '-Subtitles' }

@@ -82,6 +82,11 @@ default** turns them on, and works both for an `.srt` sitting beside the
 video and for tracks built into the file itself. X switches between them
 either way.
 
+Stopping when the credits roll counts as watching to the end — the play
+is recorded and the next episode queues under UP NEXT. **SETTINGS →
+Video settings → Counts as watched at** sets where that kicks in (95% of
+the video by default; 100% means only the very end counts).
+
 ## Controls
 
 D-pad or left stick up/down to move, left/right to switch tabs,
