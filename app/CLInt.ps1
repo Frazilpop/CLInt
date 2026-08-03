@@ -675,7 +675,21 @@ function Set-ConsoleFullscreen {
 
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 1, [ref]$coords) | Out-Null
-        Start-Sleep -Milliseconds 200
+        # The transition settles asynchronously, and a fixed sleep sometimes
+        # measured the window mid-transition - the grid below was then fitted
+        # against a size the window shrank away from, leaving a horizontal
+        # scrollbar over the freshly drawn menu (seen live 2026-08-03: the
+        # first frame went up against the pre-settle width, with the default
+        # font's metrics). Wait until the measurements stop moving instead:
+        # 4 stable 50ms samples, 2s cap - a settled window costs the same
+        # 200ms the old sleep did.
+        $lastMax = ''
+        $stable  = 0
+        for ($i = 0; $i -lt 40 -and $stable -lt 4; $i++) {
+            Start-Sleep -Milliseconds 50
+            $max = '{0}x{1}' -f [Console]::LargestWindowWidth, [Console]::LargestWindowHeight
+            if ($max -eq $lastMax) { $stable++ } else { $stable = 0; $lastMax = $max }
+        }
 
         # re-grow the grid (a windowed spell shrinks it), then
         # buffer == window so there are no scrollbars
@@ -854,6 +868,27 @@ function Repair-MenuWindow {
             }
         }
     } catch {}
+}
+
+# The scrollbar defences live in Read-InputKey's 300ms idle tick, which never
+# runs while the script is blocked waiting on another window or process - and
+# that is exactly when the user is LOOKING at the other window, with the menu
+# exposed behind or beside it. A bar born there (a fullscreen transition that
+# settled late, a game changing the display mode) used to sit on screen for
+# the whole wait, because nothing was left running to remove it (seen live
+# 2026-08-03: menu launched a shortcut seconds after startup and the startup
+# bar stayed up for the entire Wait-ForOpenedWindow). One cheap guard for the
+# wait loops: pin buffer == window, then Hide-Scrollbars - which repaints
+# only when it really removed a bar, so a quiet tick costs two API reads.
+function Protect-CoveredMenu {
+    try {
+        $cw = [Console]::WindowWidth
+        $ch = [Console]::WindowHeight
+        if ([Console]::BufferWidth -ne $cw -or [Console]::BufferHeight -ne $ch) {
+            $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cw, $ch)
+        }
+    } catch {}
+    Hide-Scrollbars
 }
 
 # Pin the menu above everything else, or let it back down again.
@@ -3652,6 +3687,7 @@ function Wait-ForOpenedWindow([int]$appearTimeoutS = 10) {
             $fg = [CLIntFocus.Win]::GetForegroundWindow()
             if ($fg -ne $script:conHwnd -and $fg -ne [IntPtr]::Zero) { $hwnd = $fg; break }
         } catch { break }
+        Protect-CoveredMenu   # the idle tick isn't running while we sit here
         Start-Sleep -Milliseconds 250
     }
     if ($hwnd -eq [IntPtr]::Zero) { return }
@@ -3660,6 +3696,11 @@ function Wait-ForOpenedWindow([int]$appearTimeoutS = 10) {
             if (-not [CLIntFocus.Win]::IsWindow($hwnd)) { break }
             if ([CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
         } catch { break }
+        # This wait can hold for as long as the opened window stays up - the
+        # menu sits exposed behind it the whole time, so keep the scrollbar
+        # and minimize-poison defences alive here too.
+        Protect-CoveredMenu
+        Repair-MenuWindow
         Start-Sleep -Milliseconds 300
     }
 }
@@ -3709,6 +3750,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                 Write-Host "   Taking a while? B goes back to the menu." -ForegroundColor $theme.Hint
                 $hintAt = $null
             }
+            Protect-CoveredMenu   # the idle tick isn't running while we sit here
             Start-Sleep -Milliseconds 500
         }
         if (-not $started) { $script:launchResult = 'TimedOut'; return }
@@ -3754,6 +3796,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                     } catch {}
                 }
             }
+            Protect-CoveredMenu   # a game changing the display can spawn a bar mid-wait
             Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
         }
         return
@@ -3773,6 +3816,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
             Write-Host "   Taking a while? B goes back to the menu." -ForegroundColor $theme.Hint
             $hintAt = $null
         }
+        Protect-CoveredMenu   # the idle tick isn't running while we sit here
         Start-Sleep -Milliseconds 500
     }
     if (-not $started) { $script:launchResult = 'TimedOut'; return }
@@ -3830,6 +3874,7 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
                     [CLIntFocus.Win]::GetForegroundWindow() -eq $script:conHwnd) { break }
             } catch {}
         }
+        Protect-CoveredMenu   # a game changing the display can spawn a bar mid-wait
         Start-Sleep -Milliseconds 500   # short: this poll is also the return-to-menu latency
     }
 }
@@ -4240,6 +4285,7 @@ try {
                                 # mid-film can only be the user at the taskbar -
                                 # as the ask to hand the screen to the player.
                                 try {
+                                    Protect-CoveredMenu   # scrollbar defences, idle tick not running
                                     Repair-MenuWindow
                                     $conIc = [CLIntFocus.Win]::IsIconic($script:conHwnd)
                                     if ($conWasIc -and -not $conIc) {
