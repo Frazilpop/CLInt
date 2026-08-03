@@ -892,6 +892,33 @@ $form.Add_KeyDown({
         'Enter'      { Toggle-Pause }
     }
     $e.Handled = $true
+    # Remote-keyboard apps (Remote Helper's Keyboard mode among them) inject
+    # characters as KEYEVENTF_UNICODE, which lands here as VK_PACKET with the
+    # real character only visible to KeyPress. Let those through to the
+    # KeyPress handler below; everything else is done - suppressing its
+    # KeyPress keeps a physical Space from firing Toggle-Pause twice.
+    if ($e.KeyCode -ne [Windows.Forms.Keys]::Packet) { $e.SuppressKeyPress = $true }
+})
+
+# Character bindings, mirroring the KeyDown map above. Only VK_PACKET
+# events reach here (see the suppression above), so a physical keypress
+# can never run both handlers.
+$form.Add_KeyPress({
+    param($sender, $e)
+    switch ([char]::ToLowerInvariant($e.KeyChar)) {
+        ' '         { Toggle-Pause }
+        "`r"        { Toggle-Pause }
+        ([char]27)  { Stop-Player }
+        '-'         { Invoke-Seek -15 }
+        '+'         { Invoke-Seek 15 }
+        '='         { Invoke-Seek 15 }
+        'v'         { Step-Spu }
+        's'         { Step-Spu }
+        'b'         { Step-Audio }
+        "`t"        { $script:osdPinned = -not $script:osdPinned
+                      if ($script:osdPinned) { Show-Osd '' 600000 } else { $script:osdUntil = 0; $osd.Hide() } }
+    }
+    $e.Handled = $true
 })
 
 # Gamepad edges, polled. Seek and volume repeat while held (scrubbing is

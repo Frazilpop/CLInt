@@ -2678,7 +2678,30 @@ function Read-InputKey {
         # selection themselves, a pointer parked over the list must not keep
         # pulling the cursor back to whatever row it happens to sit on.
         if ([Console]::KeyAvailable) {
-            $k = ([Console]::ReadKey($true)).Key
+            $ki = [Console]::ReadKey($true)
+            $k = $ki.Key
+            # Remote-keyboard apps (Remote Helper's Keyboard mode among them)
+            # inject characters as KEYEVENTF_UNICODE, which arrives as
+            # VK_PACKET (231) with the real character riding alongside.
+            # Translate it back so the switches downstream, which only ever
+            # see the ConsoleKey, keep working.
+            if ([int]$k -eq 231) {
+                $c = $ki.KeyChar
+                $k = switch ($c) {
+                    ' '        { [ConsoleKey]::Spacebar }
+                    "`r"       { [ConsoleKey]::Enter }
+                    "`n"       { [ConsoleKey]::Enter }
+                    ([char]27) { [ConsoleKey]::Escape }
+                    "`t"       { [ConsoleKey]::Tab }
+                    ([char]8)  { [ConsoleKey]::Backspace }
+                    default    {
+                        if     ($c -ge 'a' -and $c -le 'z') { [ConsoleKey]([int][ConsoleKey]::A + ([int]$c - [int][char]'a')) }
+                        elseif ($c -ge 'A' -and $c -le 'Z') { [ConsoleKey]([int][ConsoleKey]::A + ([int]$c - [int][char]'A')) }
+                        elseif ($c -ge '0' -and $c -le '9') { [ConsoleKey]([int][ConsoleKey]::D0 + ([int]$c - [int][char]'0')) }
+                        else { $ki.Key }
+                    }
+                }
+            }
             if ("$k" -in 'UpArrow', 'DownArrow') { Drain-RepeatArrows "$k" }
             $script:hoverMuted = $true
             return $k
