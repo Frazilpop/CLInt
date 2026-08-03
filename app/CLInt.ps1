@@ -3664,16 +3664,54 @@ function Wait-ForOpenedWindow([int]$appearTimeoutS = 10) {
     }
 }
 
+# The start-detection waits in Wait-ForGameExit used to be deaf: a Steam-side
+# failure (logged in on another PC, a declined update prompt, anti-cheat
+# trouble) never flips the Running flag, so the user sat trapped on a dead
+# LAUNCHING screen for the whole start timeout, then got a WELCOME BACK for a
+# game that never ran. Steam offers no launch-failed signal to watch for, so
+# the wait is cancellable instead: B / Escape / Q (pad B arrives as Escape via
+# Get-PadKey, which keeps its foreground gate - a press aimed at Steam's own
+# error dialog is not stolen). Other keys are consumed and dropped; they were
+# headed for the post-launch drain anyway.
+function Test-LaunchCancelled {
+    $cancel = $false
+    while ([Console]::KeyAvailable) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -in 'Escape', 'B', 'Q') { $cancel = $true }
+    }
+    if ((Get-PadKey) -eq [ConsoleKey]::Escape) { $cancel = $true }
+    return $cancel
+}
+
+# How the launch attempt resolved, for the caller: 'Started' (the game ran -
+# land normally), 'Cancelled' (the user backed out) or 'TimedOut' (nothing
+# ever started). Script-scoped rather than returned - Wait-ForGameExit's
+# callers ignore its pipeline, and keeping it that way means no stray output
+# from the loop bodies can ever masquerade as a result.
+$script:launchResult = 'Started'
+
 function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [scriptblock]$landing = $null) {
+    $script:launchResult = 'Started'
     if ($game.Exe) {
         # Non-Steam shortcut: Steam doesn't track these in the registry,
         # so watch the exe's process instead.
         $proc = [System.IO.Path]::GetFileNameWithoutExtension($game.Exe)
         $deadline = [DateTime]::Now.AddSeconds($startTimeoutS)
+        $hintAt   = [DateTime]::Now.AddSeconds(10)
+        $started  = $false
         while ([DateTime]::Now -lt $deadline) {
-            if (Get-Process -Name $proc -ErrorAction SilentlyContinue) { break }
+            if (Get-Process -Name $proc -ErrorAction SilentlyContinue) { $started = $true; break }
+            if (Test-LaunchCancelled) { $script:launchResult = 'Cancelled'; return }
+            if ($hintAt -and [DateTime]::Now -ge $hintAt) {
+                # a healthy launch never lingers this long, so only now is
+                # the escape hatch worth mentioning
+                Write-Host ""
+                Write-Host "   Taking a while? B goes back to the menu." -ForegroundColor $theme.Hint
+                $hintAt = $null
+            }
             Start-Sleep -Milliseconds 500
         }
+        if (-not $started) { $script:launchResult = 'TimedOut'; return }
         $holdUntil = [DateTime]::Now.AddSeconds(45)
         $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
         $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
@@ -3723,10 +3761,21 @@ function Wait-ForGameExit($game, [int]$holdTdpW = 0, [int]$startTimeoutS = 90, [
     # Steam flips this registry value to 1 while the game is running.
     $key = "HKCU:\Software\Valve\Steam\Apps\$($game.AppId)"
     $deadline = [DateTime]::Now.AddSeconds($startTimeoutS)
+    $hintAt   = [DateTime]::Now.AddSeconds(10)
+    $started  = $false
     while ([DateTime]::Now -lt $deadline) {
-        if ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) { break }
+        if ((Get-ItemProperty $key -ErrorAction SilentlyContinue).Running -eq 1) { $started = $true; break }
+        if (Test-LaunchCancelled) { $script:launchResult = 'Cancelled'; return }
+        if ($hintAt -and [DateTime]::Now -ge $hintAt) {
+            # a healthy launch never lingers this long, so only now is
+            # the escape hatch worth mentioning
+            Write-Host ""
+            Write-Host "   Taking a while? B goes back to the menu." -ForegroundColor $theme.Hint
+            $hintAt = $null
+        }
         Start-Sleep -Milliseconds 500
     }
+    if (-not $started) { $script:launchResult = 'TimedOut'; return }
     $holdUntil = [DateTime]::Now.AddSeconds(45)
     $graceEnd  = [DateTime]::Now.AddSeconds(8)   # let the game claim focus itself first
     $nextTdp   = [DateTime]::Now                 # drift-check cadence stays 2s
@@ -4349,6 +4398,7 @@ try {
                 if ($cur.Type -eq 'Shortcuts') { Start-Process $g.Path }   # run the .lnk itself
                 else                           { Start-SteamGame $g.LaunchId }
                 $script:landingPainted = $false
+                $script:launchResult   = 'Started'   # opened windows have no start to fail
                 if ($opening) {
                     # No process to watch: follow the window it opened, and
                     # return the moment it closes or the user comes back to us.
@@ -4369,8 +4419,10 @@ try {
                 # only if the game never took the screen (e.g. died at launch).
                 # An opened folder gets no landing screen at all - straight
                 # back to the live menu, which is what the user wants there.
+                # Neither does a launch that never became a game: WELCOME
+                # BACK with "played for 0m" would just rub it in.
                 $landedAt = $null
-                if (-not $opening) {
+                if (-not $opening -and $script:launchResult -eq 'Started') {
                     if (-not $script:landingPainted) { Draw-LandingScreen $g $t0 }
                     $landedAt = [DateTime]::Now
                 }
@@ -4378,7 +4430,7 @@ try {
                 # Steam has just written a fresh playtime for this game (or
                 # is about to), so the cached figures are stale.
                 $script:steamPlaytime = $null
-                if ($script:recentEnabled) {
+                if ($script:recentEnabled -and $script:launchResult -eq 'Started') {
                     Record-Play $g
                     # bubble the just-played game to the top of every game tab
                     foreach ($gt in $tabs) {
@@ -4398,6 +4450,11 @@ try {
                 }
                 while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
                 Draw-All
+                # A cancelled launch needs no announcement - the user did it.
+                # A silent timeout would look like CLInt shrugged for no reason.
+                if ($script:launchResult -eq 'TimedOut') {
+                    Show-Notice 'The game never started - Steam or its launcher may be showing an error.'
+                }
             }
             'F5'        {   # RB on the gamepad (read natively via XInput)
                 if ($tdpEnabled -and $cur.Type -in 'Steam', 'Shortcuts' -and $items.Count -gt 0) {
