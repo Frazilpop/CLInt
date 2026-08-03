@@ -794,6 +794,22 @@ function Toggle-Pause {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $script:paused = -not $script:paused
     [CLIntVlc.N]::libvlc_media_player_set_pause($script:mp, $(if ($script:paused) { 1 } else { 0 }))
+    if (-not $script:paused) {
+        # Embedded libvlc can come out of a pause with the audio running and
+        # the picture frozen on the pre-pause frame: the hardware decoder's
+        # surfaces go stale while paused (display power-management, a
+        # minimize - and this player pauses itself on every minimize) and
+        # the video pipeline never advances again on its own. Re-seeking to
+        # the spot we are already at flushes and rebuilds decoder and vout,
+        # which un-sticks it, and on a healthy resume changes nothing the
+        # eye can see. The guard keeps the clock and bar from snapping to
+        # the stale position libvlc reports mid-seek, same as Invoke-Seek.
+        $t = [CLIntVlc.N]::libvlc_media_player_get_time($script:mp)
+        if ($t -ge 0) {
+            [CLIntVlc.N]::libvlc_media_player_set_time($script:mp, $t)
+            $script:seekGuard = [Environment]::TickCount + 700
+        }
+    }
     # A paused film keeps its overlay up - the tape and the [PAUSED] tag on
     # it are the only thing saying why the picture stopped moving.
     Show-Osd '' $(if ($script:paused) { 600000 } else { 2000 })
