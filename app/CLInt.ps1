@@ -1702,19 +1702,33 @@ $builtinPlayer = $playerHost -and ($settings['VideoPlayer'] -ne 'default')
 # why one show can sit in CURRENTLY WATCHING while another's next
 # episode waits in UP NEXT. Finishing the last file of a folder simply
 # retires the folder from the section.
-function Get-EpisodeStem($name) {
-    # Episodes of one show differ from each other only by number - strip
-    # the digit runs and they collapse to the same stem, while a folder of
-    # movies yields a different stem per file. That difference is what
-    # keeps a movies folder out of UP NEXT; a numbered collection ("Alien
-    # 1", "Alien 2") still matches, so those sequels queue like episodes.
-    # (An UNnumbered first film never queues its sequel anyway: culture
-    # sort puts "Die Hard 2.mkv" before "Die Hard.mkv", so the sequel is
-    # not "after" the finished film - pre-existing A-Z rule, not this.)
-    # Whitespace is collapsed and trimmed so the leftover separator around
-    # a stripped number ("Die Hard" vs "Die Hard 2 ") can't split a stem.
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($name) -replace '\d+', ''
-    return ($stem -replace '\s+', ' ').Trim().ToLower()
+# Do two file names read as episodes of the same show? Two shapes count.
+# Names that differ only by number ("Alien 1"/"Alien 2", "Show 01"/"Show
+# 02"): strip the digit runs and they collapse to one stem, while a folder
+# of movies yields a different stem per file. And names that carry their
+# episode titles ("... - S07E09 - Moving Day"/"... - S07E10 - Party Line"):
+# the stems differ, but the names read identically up to the episode number
+# and only part ways there - so a pair whose first difference is
+# digit-against-digit also counts. That shared prefix must still hold a
+# letter once a straddled digit run is trimmed off its end, or "2001 A
+# Space Odyssey" and "2012" would pass on the strength of their dates
+# alone. Movies keep failing both tests ("Alien 3" parts from "Aliens" at
+# ' ' vs 's', not at a number), which is what keeps a movies folder out
+# of UP NEXT. (An UNnumbered first film never queues its sequel anyway:
+# culture sort puts "Die Hard 2.mkv" before "Die Hard.mkv", so the sequel
+# is not "after" the finished film - pre-existing A-Z rule, not this.)
+# Whitespace is collapsed and trimmed so the leftover separator around a
+# stripped number ("Die Hard" vs "Die Hard 2 ") can't split a stem.
+function Test-EpisodeSibling([string]$finished, [string]$candidate) {
+    $a = ([System.IO.Path]::GetFileNameWithoutExtension($finished)  -replace '\s+', ' ').Trim().ToLower()
+    $b = ([System.IO.Path]::GetFileNameWithoutExtension($candidate) -replace '\s+', ' ').Trim().ToLower()
+    if ((($a -replace '\d+', '') -replace '\s+', ' ').Trim() -eq (($b -replace '\d+', '') -replace '\s+', ' ').Trim()) { return $true }
+    $n = [Math]::Min($a.Length, $b.Length)
+    $i = 0
+    while ($i -lt $n -and $a[$i] -eq $b[$i]) { $i++ }
+    if ($i -ge $n) { return $false }   # one name is a prefix of the other: nowhere left to part at a number
+    if (-not ([char]::IsDigit($a[$i]) -and [char]::IsDigit($b[$i]))) { return $false }
+    return (($a.Substring(0, $i) -replace '\d+$', '') -match '\p{L}')
 }
 
 function Add-VideoSections($t, $list, $entries) {
@@ -1775,16 +1789,15 @@ function Add-VideoSections($t, $list, $entries) {
         foreach ($d in @($latest.Keys | Sort-Object { $latest[$_].When } -Descending)) {
             if ($upNext.Count -ge 5) { break }
             $next = $null
-            $finishedStem = Get-EpisodeStem $latest[$d].Name
             foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
                 if ($f.Name.StartsWith('.')) { continue }
                 if ($f.Extension -notmatch $script:videoExtRe) { continue }
                 if ($f.Name -le $latest[$d].Name) { continue }
                 # Only another episode of the same show qualifies - in a
-                # movies folder nothing shares the finished film's stem, so
-                # no candidate survives and the folder never queues. A miss
-                # is invisible; a wrong suggestion is noticed.
-                if ((Get-EpisodeStem $f.Name) -ne $finishedStem) { continue }
+                # movies folder no candidate reads as one, so the folder
+                # never queues. A miss is invisible; a wrong suggestion
+                # is noticed.
+                if (-not (Test-EpisodeSibling $latest[$d].Name $f.Name)) { continue }
                 $next = $f; break
             }
             if (-not $next -or $taken[$next.FullName.ToLower()]) { continue }
