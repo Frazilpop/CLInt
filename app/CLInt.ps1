@@ -351,9 +351,18 @@ function Get-SteamCollections {
 
 # Steam's own playtime, from the live account's localconfig.vdf. Each app
 # is a "<appid>" block under "apps" holding two counters, both in minutes:
-# "Playtime" is what the server knows about, "PlaytimeDisconnected" is time
-# played offline that hasn't synced yet. Steam totals the pair, so we do too
-# - otherwise an offline session looks like it never happened.
+# "playtime" is what the server knows about, "PlaytimeDisconnected" is time
+# played offline that hasn't synced yet. By default the pair is totalled -
+# otherwise an offline session looks like it never happened - but GAME
+# OPTIONS > Include offline playtime can switch the offline counter off,
+# for anyone who wants the tag to read exactly like Steam's own figure.
+#
+# The keys are matched case-INSENSITIVELY, like every VDF key: the client
+# used to write "Playtime" and now writes "playtime", and a file can carry
+# both spellings side by side. Matching capital-P only meant the lifetime
+# counter was skipped and a stale "PlaytimeDisconnected" stood in for it -
+# BallisticNG showed [11h] (the 696-minute offline counter) instead of its
+# real 119 hours.
 #
 # Read in one regex pass: an appid is a numeric key followed by a brace, and
 # every Playtime line after it belongs to that app until the next one starts.
@@ -378,9 +387,11 @@ function Get-SteamPlaytime {
                 $raw = [System.IO.File]::ReadAllText($lc)
                 $cur = $null
                 foreach ($m in [regex]::Matches($raw,
-                        '"(\d+)"\s*\r?\n\s*\{|"(?:Playtime|PlaytimeDisconnected)"\s+"(\d+)"')) {
+                        '"(\d+)"\s*\r?\n\s*\{|"(?i:Playtime(Disconnected)?)"\s+"(\d+)"')) {
                     if ($m.Groups[1].Success) { $cur = $m.Groups[1].Value }
-                    elseif ($cur)             { $map[$cur] = [int]$map[$cur] + [int]$m.Groups[2].Value }
+                    elseif ($cur -and ($script:offlinePlaytime -or -not $m.Groups[2].Success)) {
+                        $map[$cur] = [int]$map[$cur] + [int]$m.Groups[3].Value
+                    }
                 }
             }
         }
@@ -1368,6 +1379,7 @@ $showClock       = $settings['ShowClock']       -ne $false
 $showBattery     = $settings['ShowBattery']     -ne $false
 $recentEnabled   = $settings['Recent']          -ne $false
 $playtimeEnabled = $settings['Playtime']        -ne $false
+$offlinePlaytime = $settings['OfflinePlaytime'] -ne $false
 $sessionTimeOn   = $settings['SessionTime']     -ne $false
 $autoCheck       = $settings['AutoUpdateCheck'] -eq $true
 $mouseEnabled    = $settings['Mouse']           -ne $false
@@ -1991,6 +2003,8 @@ function Get-GameSettingsItems {
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Playtime'
                                 Name = ('Steam playtime tag'.PadRight(30) + $(if ($script:playtimeEnabled) { 'on' } else { 'off' })) }
+    $list += [pscustomobject]@{ Key = 'OfflinePlaytime'
+                                Name = ('Include offline playtime'.PadRight(30) + $(if ($script:offlinePlaytime) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'SessionTime'
                                 Name = ('Time played on return'.PadRight(30) + $(if ($script:sessionTimeOn) { 'on' } else { 'off' })) }
     return $list
@@ -3243,6 +3257,14 @@ function Invoke-SettingsAction([string]$key) {
             Save-Settings
             # The tag is stamped by Draw-GameLine every frame, so there is
             # no tab to rebuild - the next paint already has it right.
+        }
+        'OfflinePlaytime' {
+            $script:offlinePlaytime = -not $script:offlinePlaytime
+            $settings['OfflinePlaytime'] = $script:offlinePlaytime
+            Save-Settings
+            # The cached per-app totals were built under the old rule, so
+            # drop them; the next paint re-reads localconfig.vdf fresh.
+            $script:steamPlaytime = $null
         }
         'SessionTime' {
             $script:sessionTimeOn = -not $script:sessionTimeOn
