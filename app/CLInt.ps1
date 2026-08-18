@@ -444,10 +444,11 @@ if (-not $settings.ContainsKey('Tabs')) {
     }
 }
 $settings.Remove('LocalShortcutDir'); $settings.Remove('VideoRoot')
-# 'Fullscreen' was once persisted by the toggle; a stored 'false' made
-# every launch start windowed (and skip the font setup). Launches always
-# go fullscreen now - the SETTINGS button toggles the session only.
-$settings.Remove('Fullscreen')
+# 'Fullscreen' is the persisted display mode: the SETTINGS toggle and the
+# mode a film is left in both save it, and launch honours it. (An older
+# build removed the key here because a stored 'false' skipped the font
+# setup; the miniature windowed mode owns its font now, and launch goes
+# THROUGH fullscreen first either way - see the startup sequence.)
 # JSON round-trips tab entries as PSCustomObjects; normalize to hashtables.
 $settings['Tabs'] = @($settings['Tabs'] | ForEach-Object {
     if ($_ -is [hashtable]) { $_ }
@@ -667,12 +668,14 @@ function Hide-Scrollbars([switch]$Repaint) {
 # Alt+Enter by hand still works there, and the elaborate programmatic
 # fallbacks we tried caused more trouble than the gap they closed.
 # Apply the user's chosen text size (see $textSizes / the SETTINGS entry).
-function Set-ConsoleFontSize {
+# -Scale shrinks the glyphs for windowed mode (see $windowedFontScale):
+# the nominal sizes are fullscreen sizes.
+function Set-ConsoleFontSize([double]$Scale = 1.0) {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
         $font = New-Object CLI.Native+CONSOLE_FONT_INFOEX
         $font.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($font)
-        $font.SizeY = [int]$textSizes[$script:textSizeName]
+        $font.SizeY = [Math]::Max(8, [int][Math]::Round([int]$textSizes[$script:textSizeName] * $Scale))
         $font.FontFamily = 54; $font.FontWeight = 400
         $font.FaceName = 'Consolas'
         [CLI.Native]::SetCurrentConsoleFontEx($out, $false, [ref]$font) | Out-Null
@@ -719,19 +722,55 @@ function Set-ConsoleFullscreen {
 
 # Leave fullscreen: back to a plain window. Shrinking the GRID is what
 # actually shrinks a conhost window - its size is dictated by the grid.
+#
+# The window is a MINIATURE of the fullscreen menu, not a crop of it: same
+# grid fullscreen had, glyphs scaled down by $windowedFontScale. The old
+# windowed mode kept the fullscreen font and cut the grid to 80x25, and
+# with the glyph size unchanged inside a much smaller frame the toggle
+# read as the text GROWING (reported on a 1440p/125% box, v1.4.0) - when
+# a window shrinks, everything in it is expected to shrink too.
 function Set-ConsoleWindowed {
     try {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null
-        Set-ConsoleFontSize
+        Set-ConsoleFontSize -Scale $windowedFontScale
         try {
-            $cols = [Math]::Max(80, [int]([Console]::WindowWidth  * 0.75))
-            $rows = [Math]::Max(25, [int]([Console]::WindowHeight * 0.75))
+            # Largest* is measured at the shrunken font, so scaling it back
+            # down by the same factor lands on the grid fullscreen fits at
+            # the full-size font: screen / (cell * scale) * scale.
+            $cols = [Math]::Min([Console]::LargestWindowWidth,  [Math]::Max(80, [int]([Console]::LargestWindowWidth  * $windowedFontScale)))
+            $rows = [Math]::Min([Console]::LargestWindowHeight, [Math]::Max(25, [int]([Console]::LargestWindowHeight * $windowedFontScale)))
+            # The buffer must never be smaller than the window, and coming
+            # out of fullscreen the window can need GROWING (conhost
+            # restores its small pre-fullscreen size): widen the buffer
+            # first, place the window, then trim the buffer back to it.
+            $bw = [Math]::Max($cols, [Console]::BufferWidth)
+            $bh = [Math]::Max($rows, [Console]::BufferHeight)
+            $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($bw, $bh)
             $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($cols, $rows)
         } catch {}
         Hide-Scrollbars -Repaint
+        # conhost sometimes mis-renders the FIRST font apply of this mode
+        # transition (measured 2026-08-18: a fresh launch's miniature came
+        # up with ~8px-wide cells while claiming Consolas 21 - about 2/3
+        # the intended window - and the identical SetCurrentConsoleFontEx a
+        # beat later rendered correctly). The grid is right either way, so
+        # the heal is purely pixels: give the transition a beat, apply the
+        # same font once more, and if that visibly resized the window the
+        # first apply had indeed half-landed - repaint over the change.
+        try {
+            $r0 = New-Object CLIntFocus.Win+RECT
+            [CLIntFocus.Win]::GetWindowRect($script:conHwnd, [ref]$r0) | Out-Null
+            Start-Sleep -Milliseconds 150
+            Set-ConsoleFontSize -Scale $windowedFontScale
+            $r1 = New-Object CLIntFocus.Win+RECT
+            [CLIntFocus.Win]::GetWindowRect($script:conHwnd, [ref]$r1) | Out-Null
+            if ([Math]::Abs(($r1.Right - $r1.Left) - ($r0.Right - $r0.Left)) -gt 8) {
+                Hide-Scrollbars -Repaint
+            }
+        } catch {}
         $script:isFullscreen = $false
     } catch {}
 }
@@ -819,6 +858,14 @@ function Hide-MenuForGame {
 function Show-MenuWindow {
     if ($script:conHwnd -ne [IntPtr]::Zero) {
         try {
+            # The built-in player HIDES this window outright while it plays
+            # windowed - the windowed film "is" CLInt, see Player.ps1 - and
+            # re-shows it on its own way out. But a killed player cleans up
+            # nothing, so coming back always starts from a show; a no-op
+            # whenever the window was never hidden.
+            if (-not [CLIntFocus.Win]::IsWindowVisible($script:conHwnd)) {
+                [CLIntFocus.Win]::ShowWindow($script:conHwnd, 5) | Out-Null   # SW_SHOW
+            }
             if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) {
                 [CLIntFocus.Win]::ShowWindow($script:conHwnd, 9) | Out-Null   # SW_RESTORE
             }
@@ -878,6 +925,32 @@ function Repair-MenuWindow {
                 Show-MenuWindow
             }
         }
+    } catch {}
+}
+
+# Alt+Enter is conhost's OWN fullscreen toggle: it flips the display mode
+# without a keypress ever reaching the script, so the font and grid work
+# the Set-Console* functions do never runs - a menu Alt+Entered into
+# fullscreen kept the miniature's small glyphs (reported 2026-08-18).
+# Called from the idle tick: when the real mode disagrees with the flag,
+# finish the job exactly as if the SETTINGS toggle had been pressed -
+# same font, same grid, same saved choice. Skipped while minimized or
+# hidden (a minimized fullscreen console drops its mode transiently - see
+# Repair-MenuWindow - and must not be "fixed" into a windowed one) and
+# inside modals (their overlay must not get a main-screen repaint).
+function Sync-DisplayMode {
+    try {
+        if ($script:inModal -or $script:conHwnd -eq [IntPtr]::Zero) { return }
+        if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) { return }
+        if (-not [CLIntFocus.Win]::IsWindowVisible($script:conHwnd)) { return }
+        $m = [uint32]0
+        if (-not [CLI.Native]::GetConsoleDisplayMode([ref]$m)) { return }
+        if ([bool]($m -band 1) -eq $script:isFullscreen) { return }
+        if ($m -band 1) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
+        $settings['Fullscreen'] = $script:isFullscreen
+        Save-Settings
+        Get-Layout
+        Draw-All
     } catch {}
 }
 
@@ -1341,6 +1414,11 @@ function Get-ThemeRgbArg {
 # follows the user's display scale like every other app. Medium is the
 # 28px the app has always used.
 $textSizes = [ordered]@{ small = 20; medium = 28; large = 34 }
+# Windowed mode (the SETTINGS toggle) keeps fullscreen's grid and scales
+# the font down by this instead, so the window is a smaller picture of
+# the same menu - see Set-ConsoleWindowed. The window ends up covering
+# about this fraction of the screen in each direction.
+$windowedFontScale = 0.75
 $textSizeName = if ($settings['TextSize'] -and $textSizes.Contains([string]$settings['TextSize'])) { [string]$settings['TextSize'] } else { 'medium' }
 
 # --- Button hints (SETTINGS) --------------------------------------------
@@ -2782,6 +2860,7 @@ function Read-InputKey {
             # console size, and the resize check just below then redraws
             # in this same tick.
             Repair-MenuWindow
+            Sync-DisplayMode   # a manual Alt+Enter finishes with the proper font and grid
             $resized = $false
             try {
                 $cw = [Console]::WindowWidth
@@ -3981,7 +4060,11 @@ try {
         try { [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null } catch {}
     }
     try { (New-Object -ComObject WScript.Shell).AppActivate($PID) | Out-Null } catch {}
-    Set-ConsoleFullscreen   # always: launching CLInt means fullscreen
+    Set-ConsoleFullscreen   # always first: it establishes the font and the grid the miniature scales from
+    # ...then the saved choice: someone who left CLInt windowed gets a
+    # windowed CLInt back, next session included. Only an explicit false
+    # counts - absent (fresh install, pre-persistence settings) is fullscreen.
+    if ($settings['Fullscreen'] -eq $false) { Set-ConsoleWindowed }
     Set-ThemeColors         # before the first Draw-All: its Clear-Host lays down the background
     Set-MouseMode $mouseEnabled
     # Opt-in quiet update check: a hidden helper compares versions and
@@ -4118,9 +4201,14 @@ try {
                             }
                         }
                         'Fullscreen' {
-                            # Session-only: nothing is persisted, so the next
-                            # launch always starts fullscreen again.
+                            # Persisted: display mode is the user's one choice
+                            # and it survives a restart - leave CLInt windowed,
+                            # get a windowed CLInt back tomorrow.
                             if ($script:isFullscreen) { Set-ConsoleWindowed } else { Set-ConsoleFullscreen }
+                            # Save what actually HAPPENED (the Set-Console*
+                            # functions own the flag), not what was asked for.
+                            $settings['Fullscreen'] = $script:isFullscreen
+                            Save-Settings
                         }
                         'ShowClock' {
                             $script:showClock = -not $script:showClock
@@ -4174,9 +4262,10 @@ try {
                                 $script:textSizeName = $names[$c]
                                 $settings['TextSize'] = $script:textSizeName
                                 Save-Settings
-                                Set-ConsoleFontSize
-                                # cell size changed: re-fit the grid to the screen
-                                if ($script:isFullscreen) { Set-ConsoleFullscreen }
+                                # Re-apply the current mode rather than just the
+                                # font: each mode owns its font scale AND has to
+                                # re-fit the grid to the new cell size.
+                                if ($script:isFullscreen) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
                                 Hide-Scrollbars
                             }
                         }
@@ -4273,6 +4362,20 @@ try {
                         )
                         if (-not $script:playerHints) { $pargs += '-NoHints' }
                         if ($script:subtitlesOn)      { $pargs += '-Subtitles' }
+                        # A windowed menu opens a windowed film: display mode
+                        # is the user's one choice, carried across programs.
+                        # It travels back too - see the Windowed field read
+                        # out of the state file after the run.
+                        # Trust the glass, not the flag: if anything windowed
+                        # the console behind the script's back, the film must
+                        # still open matching what the eye sees.
+                        try {
+                            $dm = [uint32]0
+                            if ([CLI.Native]::GetConsoleDisplayMode([ref]$dm)) {
+                                $script:isFullscreen = [bool]($dm -band 1)
+                            }
+                        } catch {}
+                        if (-not $script:isFullscreen) { $pargs += '-Windowed' }
                         # Start-Process does not quote list items for you, so
                         # every path above carries its own quotes - without them
                         # "Program Files (x86)" arrives as three arguments.
@@ -4344,9 +4447,47 @@ try {
                             # folder), so every row it reports is folded back in,
                             # not just the one that was launched.
                             $rows = @()
+                            $pstate = $null
                             try {
                                 if (Test-Path $stateFile) {
-                                    $rows = @((Get-Content $stateFile -Raw | ConvertFrom-Json).Results)
+                                    $pstate = Get-Content $stateFile -Raw | ConvertFrom-Json
+                                    $rows = @($pstate.Results)
+                                }
+                            } catch {}
+                            # The mode the film was LEFT in becomes the menu's:
+                            # someone who windowed the player wants a windowed
+                            # CLInt back, and someone who took it fullscreen
+                            # wants the menu fullscreen again. Session-only,
+                            # like the SETTINGS toggle. A missing state file (a
+                            # crashed player) changes nothing. The repaint flag
+                            # drops because the mode switch re-grids the console
+                            # - whatever wrap screen was pre-painted is gone.
+                            try {
+                                if ($pstate -and $null -ne $pstate.Windowed) {
+                                    $wantFull = -not [bool]$pstate.Windowed
+                                    if ($wantFull -ne $script:isFullscreen) {
+                                        if ($wantFull) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
+                                        $script:landingPainted = $false
+                                    }
+                                    # Toggling inside the film is as much the
+                                    # user's choice as the SETTINGS button:
+                                    # persist it the same way.
+                                    $settings['Fullscreen'] = $script:isFullscreen
+                                    Save-Settings
+                                    # ...and the PLACE travels back with the
+                                    # mode: the menu window lands where the
+                                    # film's window ended, so the swap keeps
+                                    # to the one spot the user chose (the
+                                    # player took the menu's spot on the way
+                                    # out). Position only - the console's
+                                    # SIZE is owned by its grid and font. A
+                                    # bad landing is Repair-MenuWindow's to
+                                    # heal, same as any off-screen window.
+                                    if (-not $script:isFullscreen -and $pstate.Bounds) {
+                                        [CLIntFocus.Win]::SetWindowPos($script:conHwnd, [IntPtr]::Zero,
+                                            [int]$pstate.Bounds.X, [int]$pstate.Bounds.Y, 0, 0,
+                                            0x0015) | Out-Null   # NOSIZE | NOZORDER | NOACTIVATE
+                                    }
                                 }
                             } catch {}
                             $finished = $true

@@ -74,8 +74,20 @@ seeks and sets volume (up to 150%), X cycles subtitles, Y audio tracks,
 and LB/RB step through the folder's other episodes. It remembers where you
 stopped. The menu key works mid-film too: press it to pause and put CLInt
 away, press it again to bring the film back — as does clicking CLInt on
-the taskbar. A double-click (or double-tap) on the picture also returns
-to CLInt.
+the taskbar.
+
+On a desktop, **F**, **Alt+Enter** or a double-click (or double-tap) on
+the picture drops the film into a resizable window, and the same three
+take it back to fullscreen. While the film is windowed it stands in for
+CLInt entirely — the menu hides rather than loitering behind the window,
+and comes back when the film does. The mode carries across, both ways: a
+windowed CLInt opens films windowed, and however the film is left when it
+ends is how the menu returns. The choice is remembered — leave CLInt
+windowed and it starts windowed next time too (the SETTINGS toggle and
+the in-film toggle both save it). The place carries across with it: the
+film opens in the spot the menu occupied — trimmed to the video's own
+aspect, so a 16:9 film gets a 16:9 window — and wherever the film's
+window is dragged to is where the menu comes back.
 
 Subtitles start off. **SETTINGS → Video settings → Subtitles on by
 default** turns them on, and works both for an `.srt` sitting beside the

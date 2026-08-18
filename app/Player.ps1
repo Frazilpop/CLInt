@@ -1,4 +1,6 @@
-﻿# Player.ps1 - CLInt's built-in fullscreen video player.
+﻿# Player.ps1 - CLInt's built-in video player. Fullscreen by default;
+# F, Alt+Enter or a double-click on the picture drop it into a resizable
+# window and back (the same three toggles VLC itself answers to).
 #
 # Runs as its own process, not inside CLInt. Two reasons, and the first is
 # the hard one: the engine is the libvlc that ships inside an installed
@@ -46,6 +48,12 @@ param(
     # Absent means off: a file carrying a subtitle track is not a reason to
     # put it on screen. Either way X cycles them by hand during playback.
     [switch]$Subtitles,
+    # Open windowed instead of fullscreen. CLInt passes this when its own
+    # menu is in windowed mode: display mode is something the user chose
+    # once, not per program, so the film opens the way the menu was. The
+    # mode at EXIT travels back the same way, in the state file's Windowed
+    # field.
+    [switch]$Windowed,
     [int]$Volume = 100,               # starting volume, in percent (see $VOL_MAX)
     # Past this percentage of the file, stopping still counts as a full
     # watch (SETTINGS -> Video settings) - nobody owes the credits a
@@ -82,6 +90,33 @@ public static extern IntPtr GetForegroundWindow();
 public static extern short GetAsyncKeyState(int vKey);
 [DllImport("user32.dll")]
 public static extern uint GetDoubleClickTime();
+[DllImport("user32.dll")]
+public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")]
+public static extern bool IsWindow(IntPtr hWnd);
+[DllImport("user32.dll")]
+public static extern bool IsWindowVisible(IntPtr hWnd);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+private static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder sb, int max);
+public static string WindowTitle(IntPtr hWnd) {
+    var sb = new System.Text.StringBuilder(64);
+    GetWindowTextW(hWnd, sb, 64);
+    return sb.ToString();
+}
+[DllImport("dwmapi.dll")]
+private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int val, int size);
+// DWMWA_TRANSITIONS_FORCEDISABLED (3): while set, DWM plays no
+// minimize/maximize/restore animation for the window. Wrapped because the
+// attribute is an int-sized BOOL passed by reference - not marshalling to
+// do in script.
+public static void SetTransitions(IntPtr hwnd, bool enabled) {
+    int disabled = enabled ? 0 : 1;
+    DwmSetWindowAttribute(hwnd, 3, ref disabled, 4);
+}
+[StructLayout(LayoutKind.Sequential)]
+public struct RECT { public int L; public int T; public int R; public int B; }
+[DllImport("user32.dll")]
+public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
 
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern IntPtr libvlc_new(int argc, string[] argv);
@@ -137,6 +172,8 @@ public static extern void libvlc_track_description_list_release(IntPtr p);
 public static extern int libvlc_audio_set_volume(IntPtr mp, int volume);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern void libvlc_audio_set_mute(IntPtr mp, int status);
+[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+public static extern int libvlc_video_get_size(IntPtr mp, uint num, out uint px, out uint py);
 '@
 
 # --- Native gamepad input (XInput) -------------------------------------
@@ -316,7 +353,20 @@ function Save-State {
                 Last     = [string]$script:results[$k].Last
             }
         }
-        @{ Results = $rows } | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding utf8
+        # Windowed rides along so CLInt can come back in the mode the film
+        # was LEFT in - quit a windowed film, get a windowed menu. Bounds
+        # rides with it so the menu can come back in the PLACE the film was
+        # left in too - the swap keeps using the one spot the user chose.
+        # The live frame when it is still up; the remembered one (kept by
+        # the toggle and the aspect fit) when the form is already gone.
+        $state = @{ Results = $rows; Windowed = (-not $script:isFull) }
+        if (-not $script:isFull) {
+            $b = $null
+            try { if ($form.WindowState -eq 'Normal') { $b = $form.Bounds } } catch {}
+            if (-not $b) { $b = $script:winBounds }
+            if ($b) { $state.Bounds = @{ X = $b.X; Y = $b.Y; W = $b.Width; H = $b.Height } }
+        }
+        $state | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding utf8
     } catch {}
 }
 
@@ -488,7 +538,7 @@ $script:tapePause = @('| |[] |', '|_|___|')
 # have the same keys for everything (X/Y are V and B here).
 $hintTiers = if ($Controls -eq 'keyboard') {
     @(
-        '[ Space: pause    Esc: back    Arrows: seek + volume    V: subs    B: audio    PgUp/PgDn: episode ]'
+        '[ Space: pause    Esc: back    Arrows: seek + volume    F: window    V: subs    B: audio    PgUp/PgDn: episode ]'
         '[ Space: pause    Esc: back    Arrows: seek    V: subs    B: audio ]'
         '[ Space: pause    Esc: back    Arrows: seek ]'
     )
@@ -585,7 +635,11 @@ $form.FormBorderStyle = 'None'
 # the picture, and bars around a film are black in every player there has
 # ever been. The theme dresses the overlay, not the screen the video is on.
 $form.BackColor       = [Drawing.Color]::Black
-$form.WindowState     = 'Maximized'
+# A windowed launch must never pass through Maximized: WindowState set
+# before the handle is on screen is applied AT SHOW, and the 'Normal' the
+# windowed setup writes over it pre-show loses that race - the form came
+# up as a maximized-with-border window (measured, v1.4.0).
+if (-not $Windowed) { $form.WindowState = 'Maximized' }
 $form.KeyPreview      = $true
 $form.ShowInTaskbar   = $false
 $form.TopMost         = $true
@@ -635,7 +689,7 @@ $toast.Add_Paint({
 })
 
 function Show-Note([string]$text, [int]$ms = 3000) {
-    $sc = [Windows.Forms.Screen]::FromControl($form).Bounds
+    $sc = Get-PlayerBounds
     $script:toastText  = Fit $text ($script:cols - 4)
     $script:toastUntil = [Environment]::TickCount + $ms
     # A cell of quiet either side of the text, the strip's own padding above
@@ -728,6 +782,162 @@ $osd.Add_Paint({
     if ($script:hint) { Write-Cell $g $c0 $rHint $script:hint $ink.Hint }
 })
 
+# --------------------------------------------------- fullscreen/windowed ---
+# The video's own rectangle, in screen coordinates. Fullscreen the client
+# area IS the screen; windowed it is whatever the user has dragged the
+# frame to. Every screen-shaped decision (the strip, the toast, where a
+# click counts) goes through this, so both modes are the same code.
+function Get-PlayerBounds {
+    return $form.RectangleToScreen($form.ClientRectangle)
+}
+
+# (Re)fit the strip to the current picture: on show, on every mode toggle,
+# and on every windowed move or resize. The layout maths already answers a
+# smaller screen - a windowed player just IS one - so the strip narrows,
+# sheds the tape, then the hints, exactly as it does on a small display.
+function Place-Osd {
+    $b = Get-PlayerBounds
+    if ($b.Width -lt 1 -or $b.Height -lt 1) { return }
+    Set-OsdLayout $b.Width $b.Height
+    $osdH = ($script:osdRows * $script:ch) + $script:padTop + $script:padBot
+    $osd.Size     = New-Object Drawing.Size($b.Width, $osdH)
+    $osd.Location = New-Object Drawing.Point($b.X, ($b.Y + $b.Height - $osdH))
+    if ($osd.Visible) { $osd.Invalidate() }
+}
+
+$script:isFull       = $true
+$script:winBounds    = $null    # last windowed frame, so the toggle round-trips
+$script:cursorHidden = $false   # Cursor.Hide/Show keep a COUNT - never call the same one twice
+
+# Windowed, this window IS CLInt as far as the eye goes - the fullscreen
+# menu (painted with the wrap screen) hanging around behind a small film
+# window reads as two programs where the user launched one. So the menu
+# window is hidden outright for as long as the player is windowed, and put
+# back - shown, never activated; it belongs BEHIND the film - on the way
+# to fullscreen and on the way out. Handle AND title must match, the same
+# rule CLIntKey.ahk applies: a stale clint.hwnd left by a crashed menu
+# must not hide whatever stranger's window recycled the handle. And CLInt
+# covers the crash on THIS side: its Show-MenuWindow re-shows a hidden
+# console, so a killed player cannot strand the menu invisible.
+$script:menuHwnd = [IntPtr]::Zero
+if ($StateFile) {
+    try {
+        $f = Join-Path (Split-Path $StateFile -Parent) 'clint.hwnd'
+        if (Test-Path $f) {
+            $cand = [IntPtr][int64]((Get-Content $f -Raw).Trim())
+            if ([CLIntVlc.N]::IsWindow($cand) -and [CLIntVlc.N]::WindowTitle($cand) -eq 'CLInt') {
+                $script:menuHwnd = $cand
+            }
+        }
+    } catch {}
+}
+
+function Set-MenuVisible([bool]$show) {
+    if ($script:menuHwnd -eq [IntPtr]::Zero) { return }
+    try {
+        if (-not [CLIntVlc.N]::IsWindow($script:menuHwnd)) { return }
+        if ($show) {
+            if (-not [CLIntVlc.N]::IsWindowVisible($script:menuHwnd)) {
+                [CLIntVlc.N]::ShowWindow($script:menuHwnd, 8) | Out-Null   # SW_SHOWNA
+            }
+        } elseif ([CLIntVlc.N]::IsWindowVisible($script:menuHwnd)) {
+            [CLIntVlc.N]::ShowWindow($script:menuHwnd, 0) | Out-Null       # SW_HIDE
+        }
+    } catch {}
+}
+
+function Set-PlayerDisplay([bool]$full) {
+    # Remember the windowed frame before fullscreen swallows it - but only
+    # a real one. Maximized-with-a-border is the frame's own state, not a
+    # size worth restoring to.
+    if ($full -and $form.FormBorderStyle -ne 'None' -and $form.WindowState -eq 'Normal') {
+        $script:winBounds = $form.Bounds
+    }
+    # DWM animates the maximize/restore below, but only for the FORM - the
+    # strip and toast are windows of their own and snap straight to their
+    # new spots, and a picture that glides while its controls teleport
+    # reads as broken. So the toggle plays with no animation at all: a
+    # film player's fullscreen switch is expected to CUT, the way VLC's
+    # does. Off only for the toggle itself - the menu key's minimize keeps
+    # its glide.
+    try { [CLIntVlc.N]::SetTransitions($form.Handle, $false) } catch {}
+    $script:isFull = $full
+    if ($full) {
+        # Through Normal first: a border change while Maximized keeps the
+        # OLD maximized bounds, leaving the border's ghost around the
+        # picture instead of edge-to-edge film.
+        $form.WindowState     = 'Normal'
+        $form.FormBorderStyle = 'None'
+        $form.TopMost         = $true
+        $form.WindowState     = 'Maximized'
+        if (-not $script:cursorHidden) { [Windows.Forms.Cursor]::Hide(); $script:cursorHidden = $true }
+        # Menu back AFTER the film already covers the screen, so it is
+        # never seen returning.
+        Set-MenuVisible $true
+    } else {
+        # Menu away BEFORE the frame shrinks, so what the window reveals
+        # is the desktop, never a fullscreen CLInt mid-vanish.
+        Set-MenuVisible $false
+        # A window among windows: a real frame to grab, no TopMost pinning
+        # it over whatever else the desktop is doing, and the pointer back
+        # - a frame you cannot see your mouse on cannot be moved.
+        $form.TopMost         = $false
+        $form.FormBorderStyle = 'Sizable'
+        $form.WindowState     = 'Normal'
+        if (-not $script:winBounds) {
+            # First time out: 75% of the working area, centred - the same
+            # miniature proportion CLInt's own windowed menu uses.
+            $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
+            $w  = [Math]::Max(320, [int]($wa.Width  * 0.75))
+            $h  = [Math]::Max(240, [int]($wa.Height * 0.75))
+            $script:winBounds = New-Object Drawing.Rectangle(
+                ($wa.X + [int](($wa.Width - $w) / 2)),
+                ($wa.Y + [int](($wa.Height - $h) / 2)), $w, $h)
+        }
+        $form.Bounds = $script:winBounds
+        if ($script:cursorHidden) { [Windows.Forms.Cursor]::Show(); $script:cursorHidden = $false }
+    }
+    # The state changes above complete inside their setters, so the
+    # animation window is already past - this cannot re-animate them.
+    try { [CLIntVlc.N]::SetTransitions($form.Handle, $true) } catch {}
+    Place-Osd
+}
+
+function Toggle-PlayerDisplay {
+    Set-PlayerDisplay (-not $script:isFull)
+    Show-Note $(if ($script:isFull) { 'Fullscreen' } else { 'Windowed' }) 2000
+}
+
+# A windowed launch takes effect HERE, before the form ever shows, so the
+# first thing on screen is already the window - not a fullscreen frame
+# collapsing out of it. (Set-PlayerDisplay touches $form.Handle, which
+# quietly creates the handle early; StartPosition is set first so its
+# handle-creation default cannot override the bounds we are about to
+# place.) This also hides the menu window straight away - the windowed
+# player replaces a windowed CLInt the same way it replaces a fullscreen
+# one.
+if ($Windowed) {
+    # A windowed film takes the STAGE the menu occupied: same frame, same
+    # spot, so the launcher and the player read as one window swapping
+    # faces rather than two windows in two places. Read in THIS process -
+    # both sides are equally DPI-(un)aware, so the numbers line up. The
+    # tick's aspect fit then trims the height to the picture's own shape.
+    # Falls back to Set-PlayerDisplay's 75%-centred default when the menu
+    # window is unknown (standalone run, stale hwnd).
+    if ($script:menuHwnd -ne [IntPtr]::Zero) {
+        try {
+            $mr = New-Object CLIntVlc.N+RECT
+            if ([CLIntVlc.N]::GetWindowRect($script:menuHwnd, [ref]$mr) -and
+                ($mr.R - $mr.L) -ge 320 -and ($mr.B - $mr.T) -ge 240) {
+                $script:winBounds = New-Object Drawing.Rectangle(
+                    $mr.L, $mr.T, ($mr.R - $mr.L), ($mr.B - $mr.T))
+            }
+        } catch {}
+    }
+    $form.StartPosition = 'Manual'
+    Set-PlayerDisplay $false
+}
+
 # ------------------------------------------------------------- playback ---
 function Start-File([string]$path) {
     Stop-Current
@@ -735,6 +945,7 @@ function Start-File([string]$path) {
     $script:lastTime = 0
     $script:lastLen  = 0
     $script:subsPicked = $false
+    $script:aspectDone = $false   # each file gets one windowed aspect fit (see the tick)
     # Tracks are not known the instant play() returns, so the auto-pick gets
     # a few seconds to find them before it gives up on this file.
     $script:subsUntil  = [Environment]::TickCount + 8000
@@ -875,7 +1086,7 @@ function Stop-Player {
 }
 
 # ----------------------------------------------------------------- input ---
-# Keyboard follows VLC where VLC has an opinion (space, v, b) so muscle
+# Keyboard follows VLC where VLC has an opinion (space, f, v, b) so muscle
 # memory carries over, and the gamepad follows CLInt's own menu (A acts,
 # B goes back) so muscle memory carries over from the other direction.
 $form.Add_KeyDown({
@@ -894,8 +1105,14 @@ $form.Add_KeyDown({
         'V'          { Step-Spu }
         'S'          { Step-Spu }
         'B'          { Step-Audio }
+        'F'          { Toggle-PlayerDisplay }
+        # PowerShell's switch compares an enum by its STRING - unlike -eq,
+        # which converts the label to the enum first - and Keys.ToString()
+        # spells these by their canonical names: PageDown is 'Next', Enter
+        # is 'Return'. The friendlier aliases would never match; PgDn (and
+        # Enter below) sat dead behind them until v1.4.0.
         'PageUp'     { Step-Episode -1 }
-        'PageDown'   { Step-Episode 1 }
+        'Next'       { Step-Episode 1 }
         # Media keys, as sent by remotes (Remote Helper's pause button among
         # them) and the media row on most keyboards. They arrive as ordinary
         # KeyDowns on the focused window, so cases here are all it takes.
@@ -905,7 +1122,9 @@ $form.Add_KeyDown({
         'MediaNextTrack'     { Step-Episode 1 }
         'Tab'        { $script:osdPinned = -not $script:osdPinned
                        if ($script:osdPinned) { Show-Osd '' 600000 } else { $script:osdUntil = 0; $osd.Hide() } }
-        'Enter'      { Toggle-Pause }
+        # Alt+Enter is the fullscreen toggle everywhere else on Windows;
+        # Enter on its own pauses. 'Return', not 'Enter' - see PageDown.
+        'Return'     { if ($e.Alt) { Toggle-PlayerDisplay } else { Toggle-Pause } }
     }
     $e.Handled = $true
     # Remote-keyboard apps (Remote Helper's Keyboard mode among them) inject
@@ -931,6 +1150,7 @@ $form.Add_KeyPress({
         'v'         { Step-Spu }
         's'         { Step-Spu }
         'b'         { Step-Audio }
+        'f'         { Toggle-PlayerDisplay }
         "`t"        { $script:osdPinned = -not $script:osdPinned
                       if ($script:osdPinned) { Show-Osd '' 600000 } else { $script:osdUntil = 0; $osd.Hide() } }
     }
@@ -983,12 +1203,18 @@ function Read-Pad {
     }
 }
 
-# Double-click (or double-tap, on a touchscreen) leaves the film the same
-# way Esc and B do. Polled like the pad, not a MouseDoubleClick handler:
-# the vout child window owns every pixel the film is on, so the form never
-# hears a click land there. GetAsyncKeyState hears it wherever it lands,
-# and the foreground check keeps a double-click in some OTHER window - a
-# dialog that stole focus - from quietly ending the film behind it.
+# Double-click (or double-tap, on a touchscreen) toggles fullscreen and
+# windowed, the same thing it does in VLC. (It used to leave the film the
+# way Esc does - but ending playback is what Esc, B and the close box are
+# FOR, and every player a double-click has ever been learned in toggles.)
+# Polled like the pad, not a MouseDoubleClick handler: the vout child
+# window owns every pixel the film is on, so the form never hears a click
+# land there. GetAsyncKeyState hears it wherever it lands, so two checks
+# narrow it to OUR picture: foreground keeps a double-click in some OTHER
+# window - a dialog that stole focus - from acting on the film behind it,
+# and the bounds check keeps the windowed frame's own chrome out of it
+# (dragging the title bar, and Windows' double-click-to-maximize there,
+# are the frame's business, not ours).
 $script:lmbPrev    = $false
 $script:lastClick  = -1000000
 $script:dblClickMs = [int][CLIntVlc.N]::GetDoubleClickTime()
@@ -996,11 +1222,12 @@ $script:dblClickMs = [int][CLIntVlc.N]::GetDoubleClickTime()
 function Read-Mouse {
     $down = ([CLIntVlc.N]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
     if ($down -and -not $script:lmbPrev -and
-        [CLIntVlc.N]::GetForegroundWindow() -eq $form.Handle) {
+        [CLIntVlc.N]::GetForegroundWindow() -eq $form.Handle -and
+        (Get-PlayerBounds).Contains([Windows.Forms.Cursor]::Position)) {
         $now = [Environment]::TickCount
         if (($now - $script:lastClick) -le $script:dblClickMs) {
             $script:lastClick = -1000000
-            Stop-Player
+            Toggle-PlayerDisplay
         } else {
             $script:lastClick = $now
         }
@@ -1019,9 +1246,12 @@ $timer.Interval = 40
 $timer.Add_Tick({
     # XInput is global - it reads the controller whether or not this window
     # has it. Fullscreen that distinction never showed, but a player put
-    # away by the menu key must not keep acting on a controller that is now
-    # playing something else: B here is "quit the film".
-    if ($form.WindowState -ne 'Minimized') { Read-Pad; Read-Mouse } else { $script:padHeld = $null }
+    # away by the menu key - or sitting in a window BEHIND whatever has the
+    # focus now - must not keep acting on a controller that is now playing
+    # something else: B here is "quit the film".
+    $away = ($form.WindowState -eq 'Minimized') -or
+            (-not $script:isFull -and [CLIntVlc.N]::GetForegroundWindow() -ne $form.Handle)
+    if (-not $away) { Read-Pad; Read-Mouse } else { $script:padHeld = $null }
     $script:tick++
     if ($script:tick % 5 -ne 0) { return }
 
@@ -1077,6 +1307,41 @@ $timer.Add_Tick({
         }
     }
 
+    # One windowed aspect fit per file: once VLC knows the picture's real
+    # dimensions, trim the frame to that shape - same top-left, same width,
+    # height from the video's own aspect - so a 16:9 film gets a 16:9
+    # window instead of the menu's letterboxed rectangle. Once, so a frame
+    # the user then resizes by hand stays resized; and only from 'Normal'
+    # (never mid-minimize, never fullscreen). Clamped to the working area:
+    # a portrait video scales its width down rather than growing off-screen.
+    if (-not $script:aspectDone -and -not $script:isFull -and
+        $form.WindowState -eq 'Normal' -and $st -eq 3) {
+        $vw = [uint32]0; $vh = [uint32]0
+        if ([CLIntVlc.N]::libvlc_video_get_size($script:mp, 0, [ref]$vw, [ref]$vh) -eq 0 -and
+            $vw -gt 0 -and $vh -gt 0) {
+            $script:aspectDone = $true
+            try {
+                $b = $form.Bounds
+                $chromeW = $b.Width  - $form.ClientSize.Width
+                $chromeH = $b.Height - $form.ClientSize.Height
+                $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
+                $newW = $b.Width
+                $newH = [int][Math]::Round(($newW - $chromeW) * $vh / $vw) + $chromeH
+                if ($newH -gt $wa.Height) {
+                    $newH = $wa.Height
+                    $newW = [int][Math]::Round(($newH - $chromeH) * $vw / $vh) + $chromeW
+                }
+                if ([Math]::Abs($newH - $b.Height) -gt 8 -or [Math]::Abs($newW - $b.Width) -gt 8) {
+                    $x = [Math]::Min([Math]::Max($b.X, $wa.X), $wa.Right  - $newW)
+                    $y = [Math]::Min([Math]::Max($b.Y, $wa.Y), $wa.Bottom - $newH)
+                    $form.Bounds = New-Object Drawing.Rectangle($x, $y, $newW, $newH)
+                    $script:winBounds = $form.Bounds
+                    Place-Osd
+                }
+            } catch {}
+        }
+    }
+
     if ($st -eq 6 -or $st -eq 7) {        # Ended / Error
         if ($st -eq 6) { $script:lastTime = $script:lastLen }   # ran to the end: a watch, not a bail
         Stop-Player
@@ -1107,16 +1372,32 @@ $timer.Add_Tick({
 # coming back to a paused picture and pressing A is better than audio
 # starting the instant the window reappears.
 $form.Add_Resize({
-    if ($script:mp -eq [IntPtr]::Zero -or $script:quitting) { return }
+    if ($script:quitting) { return }
     if ($form.WindowState -eq 'Minimized') {
-        if (-not $script:paused) {
+        if ($script:mp -ne [IntPtr]::Zero -and -not $script:paused) {
             $script:paused = $true
             [CLIntVlc.N]::libvlc_media_player_set_pause($script:mp, 1)
         }
-    } elseif ($script:paused) {
+        return
+    }
+    # Any other size change - a windowed resize, a maximize, a mode toggle,
+    # a restore - re-fits the strip to the new frame.
+    if (-not $script:isFull -and $form.WindowState -eq 'Normal') { $script:winBounds = $form.Bounds }
+    Place-Osd
+    if ($script:mp -ne [IntPtr]::Zero -and $script:paused) {
         # Back on screen: the strip says why the picture is not moving,
         # the same way a manual pause keeps it up.
         Show-Osd '' 600000
+    }
+})
+
+# A windowed frame dragged across the screen takes its strip and toast
+# with it. Owned windows keep only their z-order coupled to the owner -
+# position is ours to chase.
+$form.Add_Move({
+    if (-not $script:quitting -and $form.WindowState -eq 'Normal') {
+        if (-not $script:isFull) { $script:winBounds = $form.Bounds }
+        Place-Osd
     }
 })
 
@@ -1127,16 +1408,14 @@ $form.Add_Shown({
                 ([int64]$form.Handle) -Encoding Ascii
         } catch {}
     }
-    $sc = [Windows.Forms.Screen]::FromControl($form).Bounds
     # The strip is as tall as its contents, so the text size decides it -
     # the same setting that decides how big the menu's own rows are.
-    Set-OsdLayout $sc.Width $sc.Height
-    $osdH = ($script:osdRows * $script:ch) + $script:padTop + $script:padBot
-    $osd.Size     = New-Object Drawing.Size($sc.Width, $osdH)
-    $osd.Location = New-Object Drawing.Point($sc.X, ($sc.Y + $sc.Height - $osdH))
+    Place-Osd
     $form.Activate()
     [CLIntVlc.N]::SetForegroundWindow($form.Handle) | Out-Null
-    [Windows.Forms.Cursor]::Hide()
+    # Only fullscreen swallows the pointer; a windowed launch keeps it -
+    # a frame you cannot see your mouse on cannot be moved or resized.
+    if ($script:isFull) { [Windows.Forms.Cursor]::Hide(); $script:cursorHidden = $true }
     # A handheld left to play a film must not black out ten minutes in.
     [CLIntVlc.N]::KeepAwake($true)
     if (-not (Start-File $Video)) { Stop-Player; return }
@@ -1166,6 +1445,9 @@ try {
         try { Remove-Item (Join-Path (Split-Path $StateFile -Parent) 'player.hwnd') -Force -ErrorAction SilentlyContinue } catch {}
     }
     try { [Windows.Forms.Cursor]::Show() } catch {}
+    # Quitting from windowed mode must not leave the menu hidden - it is
+    # about to take the screen back.
+    try { Set-MenuVisible $true } catch {}
     try { [CLIntVlc.N]::KeepAwake($false) } catch {}
     try { [CLIntVlc.N]::libvlc_release($inst) } catch {}
 }
