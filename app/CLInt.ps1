@@ -1503,6 +1503,31 @@ $updateNoticeShown = $false
 # the time it was last played, which is all the ordering needs. Playtime
 # is Steam's to report - see Get-SteamPlaytime. Only touched while the
 # feature is enabled.
+#
+# "Recently" is a window, not "ever". Without one the section grew with
+# every new game launched until it had swallowed most of the library and
+# the A-Z list below it meant nothing - so RecentDays says how far back
+# it looks, 0 keeping the old no-limit behaviour for anyone who wants it.
+# Entries that fall outside the window are LEFT on disk rather than
+# pruned: widening the window brings them back, and a game played again
+# next year keeps its old place until Record-Play overwrites it.
+$recentDaysOpts = @(1, 3, 7, 14, 30, 0)
+$recentDays = 7
+# ([int]$null is 0, which is itself a valid option here, so the key has to
+# be checked for before it is read - otherwise a fresh install, or any
+# install from before this setting existed, would come up with no limit.)
+if ($null -ne $settings['RecentDays']) {
+    try {
+        if ($recentDaysOpts -contains [int]$settings['RecentDays']) {
+            $recentDays = [int]$settings['RecentDays']
+        }
+    } catch {}
+}
+function Get-RecentDaysLabel([int]$d) {
+    if ($d -le 0) { return 'no limit' }
+    if ($d -eq 1) { return '1 day' }
+    return "$d days"
+}
 $recentFile = Join-Path $script:dataDir 'recent.json'
 $recentMap = @{}
 if (Test-Path $recentFile) {
@@ -1518,6 +1543,22 @@ function Record-Play($game) {
     $script:recentMap[[string]$game.AppId] = [pscustomobject]@{
         Last = [DateTime]::Now.ToString('s')
     }
+    Save-RecentMap
+}
+# The one place that decides whether a game is "recently played", so the
+# section and the Y-menu's "remove from recently played" row can never
+# disagree about what is in it. An entry whose stamp won't parse is out:
+# it can't be placed in the window, and it used to sort to the bottom of
+# the section on a DateTime::MinValue fallback anyway.
+function Test-RecentGame($game) {
+    $e = $script:recentMap[[string]$game.AppId]
+    if (-not $e) { return $false }
+    if ($script:recentDays -le 0) { return $true }
+    try { $last = [DateTime]$e.Last } catch { return $false }
+    return (([DateTime]::Now - $last).TotalDays -lt $script:recentDays)
+}
+function Remove-RecentEntry($game) {
+    $script:recentMap.Remove([string]$game.AppId)
     Save-RecentMap
 }
 # Video history (Files tabs): play counts tracked here per machine, and
@@ -1680,12 +1721,19 @@ function Get-ResumeEntries {
 # recent first), with a gap before the A-Z list so the split is obvious.
 # The title/spacer rows carry Unselectable = $true: the cursor slides past
 # them and they can't be launched. No-op while the feature is off.
+#
+# Membership is the RecentDays window (see Test-RecentGame), so a game
+# drops back into A-Z of its own accord once it has been left alone for
+# long enough. The lists are re-split here, which happens on a game
+# return, a settings change and a tab rebuild - not on a timer - so a
+# window boundary crossed while the menu sits idle shows at the next
+# launch rather than the exact minute. Nothing worth a redraw loop for.
 function Sort-Games($list) {
     $list = @($list | Where-Object { -not $_.Unselectable })   # strip old section rows before re-sorting
     if (-not $script:recentEnabled -or $script:recentMap.Count -eq 0) { return @($list) }
     $recent = @(); $rest = @()
     foreach ($g in $list) {
-        if ($script:recentMap[[string]$g.AppId]) { $recent += $g } else { $rest += $g }
+        if (Test-RecentGame $g) { $recent += $g } else { $rest += $g }
     }
     if ($recent.Count -eq 0) { return @($rest) }
     $recent = @($recent | Sort-Object {
@@ -2079,6 +2127,12 @@ function Get-GameSettingsItems {
                                 Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'Recent'
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
+    # How far back that section reaches. Only there while the section is,
+    # so it is never a setting for something switched off.
+    if ($script:recentEnabled) {
+        $list += [pscustomobject]@{ Key = 'RecentDays'
+                                    Name = ('Counts as recent for'.PadRight(30) + (Get-RecentDaysLabel $script:recentDays)) }
+    }
     $list += [pscustomobject]@{ Key = 'Playtime'
                                 Name = ('Steam playtime tag'.PadRight(30) + $(if ($script:playtimeEnabled) { 'on' } else { 'off' })) }
     $list += [pscustomobject]@{ Key = 'OfflinePlaytime'
@@ -3330,6 +3384,20 @@ function Invoke-SettingsAction([string]$key) {
             Save-Settings
             Build-Tabs   # apply or undo the recent-first sorting
         }
+        'RecentDays' {
+            # A steps through the windows that make sense, the way a toggle
+            # steps through two - the same treatment as "Counts as watched at".
+            $i = [array]::IndexOf($script:recentDaysOpts, $script:recentDays)
+            $script:recentDays = $script:recentDaysOpts[($i + 1) % $script:recentDaysOpts.Count]
+            $settings['RecentDays'] = $script:recentDays
+            Save-Settings
+            Build-Tabs   # re-split every game list against the new window
+            $script:pendingNotice = if ($script:recentDays -le 0) {
+                'Every game you have played from CLInt now shows under RECENTLY PLAYED.'
+            } else {
+                "Games played within $(Get-RecentDaysLabel $script:recentDays) now show under RECENTLY PLAYED."
+            }
+        }
         'Playtime' {
             $script:playtimeEnabled = -not $script:playtimeEnabled
             $settings['Playtime'] = $script:playtimeEnabled
@@ -3419,6 +3487,7 @@ function Show-SettingsGroup([string]$title, [scriptblock]$build) {
     $script:modalTop = 4; $script:modalOff = 0
     $script:modalHover = 0
     $notice = ''
+    $drawn = 0     # rows painted last pass - see the blanking loop below
     Clear-Host
     Get-Layout
     while ($true) {
@@ -3432,6 +3501,16 @@ function Show-SettingsGroup([string]$title, [scriptblock]$build) {
             if ($i -eq $sel) { Write-At 1 (4 + $i) (Pad ('  >> ' + $rows[$i].Name + '  ') ($W - 3)) $theme.SelFg $theme.Accent }
             else             { Write-At 1 (4 + $i) (Pad ('     ' + $rows[$i].Name + '  ') ($W - 3)) $theme.Text }
         }
+        # These pages can lose a row to the change just made - turning
+        # "Recently played first" off takes the window row under it away,
+        # switching the built-in player off takes three - and the rows are
+        # painted in place, not cleared first. So blank what the shorter
+        # list vacated: the old bottom row, and the notice line, which has
+        # moved up with it. Left alone they sit there as duplicates.
+        for ($i = $rows.Count; $i -le $drawn + 1; $i++) {
+            Write-At 1 (4 + $i) (' ' * ($W - 3)) $theme.Text
+        }
+        $drawn = $rows.Count
         # Padded every pass, so the line blanks itself once the notice has
         # been answered by the next keypress.
         Write-At 2 (5 + $rows.Count) (Pad $notice ($W - 4)) $theme.Notice
@@ -3502,14 +3581,54 @@ function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bo
     return $false
 }
 
+# Y on a game row. The rows are built from what is true of this game, so
+# nothing dead is ever offered - and when nothing is true of it, Y stays
+# inert on that row exactly as it did before there was anything but the
+# uninstall here.
 function Show-GameMenu($g) {
+    $opts = @(); $acts = @()
+    # First when it is there: on a row sitting up in the RECENTLY PLAYED
+    # section, this is the reason the menu was opened. Gated on the window
+    # as well as the entry, so the row appears for precisely the games the
+    # section is showing - offering it on an older entry would look like it
+    # had done nothing.
+    if ($script:recentEnabled -and (Test-RecentGame $g)) {
+        $opts += 'Remove from recently played'; $acts += 'unrecent'
+    }
     # Uninstalling is Steam's business: a non-Steam shortcut is just a path
     # Steam was told about, so there is nothing to remove and nothing to
-    # say about it - Y is simply inert on those rows.
-    if (-not $g.Steam) { return }
+    # say about it.
+    if ($g.Steam) { $opts += 'Uninstall this game'; $acts += 'uninstall' }
+    if ($opts.Count -eq 0) { return }
     $name = "$([string]$g.Name)".ToUpper()
-    $c = Pick-Option $name @('Uninstall this game', 'Return')
-    if ($c -ne 0) { Draw-All; return }
+    $c = Pick-Option $name ($opts + @('Return'))
+    if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
+    switch ($acts[$c]) {
+        'unrecent'  { Remove-RecentGame $g }
+        'uninstall' { Invoke-GameUninstall $g $name }
+    }
+}
+
+# Out of the section and back into the A-Z list below it - with the cursor
+# following the game there, so where it went is visible instead of the
+# whole list appearing to reshuffle under a stationary highlight. Nothing
+# else is forgotten: playing it again records it afresh and it returns.
+function Remove-RecentGame($g) {
+    Remove-RecentEntry $g
+    foreach ($gt in $script:tabs) {
+        if ($gt.Type -in 'Steam', 'Shortcuts') { $gt.Items = @(Sort-Games $gt.Items) }
+    }
+    $script:items = @(Get-TabItems $script:tab)
+    $i = [array]::IndexOf($script:items, $g)
+    if ($i -ge 0) { $script:selected = $i }
+    $script:selected = [Math]::Min($script:selected, [Math]::Max(0, $script:items.Count - 1))
+    Snap-Selection
+    Snap-Viewport
+    Draw-All
+    Show-Notice "$($g.Name) removed from recently played."
+}
+
+function Invoke-GameUninstall($g, [string]$name) {
     # Our own confirmation, driven by the d-pad like everything else here.
     # It is not a formality: app_uninstall below removes the game outright
     # without asking, so this prompt is the only thing in front of it.

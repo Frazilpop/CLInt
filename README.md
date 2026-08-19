@@ -99,6 +99,25 @@ is recorded and the next episode queues under UP NEXT. **SETTINGS →
 Video settings → Counts as watched at** sets where that kicks in (95% of
 the video by default; 100% means only the very end counts).
 
+## Recently played
+
+Games you have played sit in a RECENTLY PLAYED section at the top of their
+tab, newest first, above the A-Z list. "Recently" is the last **7 days** by
+default — **SETTINGS → Game settings → Counts as recent for** steps that
+through 1, 3, 7, 14 and 30 days, or no limit at all if you would rather the
+section simply kept everything. A game drops back into A-Z by itself once
+it has been left alone for longer than that, and playing it again puts it
+straight back on top.
+
+One can be sent back early: **Y** on it and **Remove from recently played**.
+Nothing else about the game changes, and playing it again brings it back.
+
+The whole section can be switched off under **SETTINGS → Game settings →
+Recently played first**.
+
+Only games launched from CLInt count — CLInt sees a launch it made, not one
+made from Steam or a desktop shortcut.
+
 ## Controls
 
 D-pad or left stick up/down to move, left/right to switch tabs,
@@ -122,7 +141,8 @@ that last one: tabs then switch as soon as the pointer rests on them.
 **Y**, **M** on the keyboard, or **right-click** opens a short menu for
 whatever is highlighted.
 
-Steam games can be uninstalled from here, without leaving CLInt. Videos get
+A game in RECENTLY PLAYED can be removed from that section, and Steam games
+can be uninstalled from here, without leaving CLInt. Videos get
 their play count changed — up, down, or back to zero — and a part-watched
 one can be marked as completed (a play is recorded and the resume position
 cleared, so the next episode queues under UP NEXT) or just have its resume
