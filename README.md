@@ -115,8 +115,13 @@ Nothing else about the game changes, and playing it again brings it back.
 The whole section can be switched off under **SETTINGS → Game settings →
 Recently played first**.
 
-Only games launched from CLInt count — CLInt sees a launch it made, not one
-made from Steam or a desktop shortcut.
+Steam games count whether or not CLInt launched them: alongside its own
+record CLInt reads the "last played" stamp Steam keeps for each game, so a
+session started from Steam itself, or from a desktop shortcut, still shows
+up. Steam syncs that stamp between machines, so a game played on another PC
+appears here too, as long as it is installed here as well. Shortcuts in a
+LOCAL GAMES tab have no such stamp anywhere, so those count only when
+launched from CLInt.
 
 ## Controls
 

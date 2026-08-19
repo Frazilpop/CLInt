@@ -372,10 +372,21 @@ function Get-SteamCollections {
 # Steam flushes this file periodically rather than on every exit, so a
 # just-finished session can take a moment to land. The cache is dropped
 # after each game to pick up the new figure as soon as it is written.
+#
+# The same blocks carry "LastPlayed" - a unix timestamp, which is how Steam
+# knows what to put at the top of its own recent list - so it is read in the
+# same pass and cached alongside. That is the only record of a game played
+# by starting Steam directly rather than through CLInt (see Get-RecentStamp),
+# and the reason both caches are dropped together: a game that has just
+# exited has a new figure for each.
 $script:steamPlaytime = $null
-function Get-SteamPlaytime {
-    if ($null -ne $script:steamPlaytime) { return $script:steamPlaytime }
-    $map = @{}
+$script:steamLastPlayed = $null
+function Clear-SteamLocalConfigCache {
+    $script:steamPlaytime = $null
+    $script:steamLastPlayed = $null
+}
+function Read-SteamLocalConfig {
+    $play = @{}; $last = @{}
     try {
         $dir = Get-SteamUserDir
         if ($dir) {
@@ -387,17 +398,34 @@ function Get-SteamPlaytime {
                 $raw = [System.IO.File]::ReadAllText($lc)
                 $cur = $null
                 foreach ($m in [regex]::Matches($raw,
-                        '"(\d+)"\s*\r?\n\s*\{|"(?i:Playtime(Disconnected)?)"\s+"(\d+)"')) {
+                        '"(\d+)"\s*\r?\n\s*\{|"(?i:Playtime(Disconnected)?)"\s+"(\d+)"|"(?i:LastPlayed)"\s+"(\d+)"')) {
                     if ($m.Groups[1].Success) { $cur = $m.Groups[1].Value }
-                    elseif ($cur -and ($script:offlinePlaytime -or -not $m.Groups[2].Success)) {
-                        $map[$cur] = [int]$map[$cur] + [int]$m.Groups[3].Value
+                    elseif (-not $cur) { }
+                    elseif ($m.Groups[4].Success) {
+                        # Keep the largest: an appid can appear in more than
+                        # one braced block, and only one of them is the play
+                        # record. (Playtime accumulates instead - the pair of
+                        # counters is meant to be totalled.)
+                        $t = [int64]$m.Groups[4].Value
+                        if ($t -gt [int64]$last[$cur]) { $last[$cur] = $t }
+                    }
+                    elseif ($script:offlinePlaytime -or -not $m.Groups[2].Success) {
+                        $play[$cur] = [int]$play[$cur] + [int]$m.Groups[3].Value
                     }
                 }
             }
         }
     } catch {}
-    $script:steamPlaytime = $map
-    return $map
+    $script:steamPlaytime = $play
+    $script:steamLastPlayed = $last
+}
+function Get-SteamPlaytime {
+    if ($null -eq $script:steamPlaytime) { Read-SteamLocalConfig }
+    return $script:steamPlaytime
+}
+function Get-SteamLastPlayed {
+    if ($null -eq $script:steamLastPlayed) { Read-SteamLocalConfig }
+    return $script:steamLastPlayed
 }
 
 # ----------------------------------------------------------- Settings ---
@@ -1545,20 +1573,71 @@ function Record-Play($game) {
     }
     Save-RecentMap
 }
-# The one place that decides whether a game is "recently played", so the
-# section and the Y-menu's "remove from recently played" row can never
-# disagree about what is in it. An entry whose stamp won't parse is out:
-# it can't be placed in the window, and it used to sort to the bottom of
-# the section on a DateTime::MinValue fallback anyway.
-function Test-RecentGame($game) {
+# When this game was last played, by either account of it: our own record
+# of launching it, and - for a Steam game - the LastPlayed stamp Steam
+# writes for itself, which is the only way a session started from Steam's
+# own UI or a desktop shortcut is ever seen. The later of the two wins:
+# Steam only flushes localconfig.vdf periodically, so straight after a
+# game our own stamp is the fresher one, and days later Steam's may be.
+# $null means never played (as far as anything here can tell).
+#
+# Non-Steam shortcuts have no equivalent anywhere - Steam keeps a block for
+# them but writes no LastPlayed into it - so those stay CLInt-only. The
+# lookup is skipped for them rather than left to miss, so nothing depends
+# on that staying true.
+#
+# Two tombstones can veto a stamp, and they exist because Steam's record is
+# not ours to delete: "remove from recently played" and "clear history"
+# would both be powerless against it otherwise - the game would sit back
+# down in the section the moment the list was rebuilt. A tombstone hides
+# every stamp up to the moment it was written, so a later play always
+# brings the game back, however it was started.
+$RECENT_CLEARED_KEY = '::cleared'   # not a Steam appid, not a local:<name>
+function Get-RecentStamp($game) {
+    $best = $null
     $e = $script:recentMap[[string]$game.AppId]
-    if (-not $e) { return $false }
+    if ($e) { try { $best = [DateTime]$e.Last } catch {} }
+    if ($game.Steam) {
+        $t = (Get-SteamLastPlayed)[[string]$game.AppId]
+        if ($t) {
+            try {
+                $s = [DateTimeOffset]::FromUnixTimeSeconds([int64]$t).LocalDateTime
+                if (-not $best -or $s -gt $best) { $best = $s }
+            } catch {}
+        }
+    }
+    if ($null -eq $best) { return $null }
+    foreach ($h in @($e.Hidden, $script:recentMap[$script:RECENT_CLEARED_KEY].Hidden)) {
+        if ($h) { try { if ($best -le [DateTime]$h) { return $null } } catch {} }
+    }
+    return $best
+}
+# The one place that decides whether a game is "recently played", so the
+# section, its ordering and the Y-menu's "remove from recently played" row
+# can never disagree about what is in it.
+function Test-RecentGame($game) {
+    $last = Get-RecentStamp $game
+    if ($null -eq $last) { return $false }
     if ($script:recentDays -le 0) { return $true }
-    try { $last = [DateTime]$e.Last } catch { return $false }
     return (([DateTime]::Now - $last).TotalDays -lt $script:recentDays)
 }
+# Not a deletion: a stamp of our own can be dropped, but Steam's can't, so
+# what goes in is a tombstone dated now - everything up to this moment is
+# hidden, and the next play (from anywhere) outdates it. Record-Play writes
+# a fresh object over the top, which is what clears it again.
 function Remove-RecentEntry($game) {
-    $script:recentMap.Remove([string]$game.AppId)
+    $script:recentMap[[string]$game.AppId] = [pscustomobject]@{
+        Hidden = [DateTime]::Now.ToString('s')
+    }
+    Save-RecentMap
+}
+# ...and the same trick for the whole list at once, so clear-history keeps
+# meaning what it says. One reserved entry rather than a tombstone per
+# game: it covers games not currently listed (an uninstalled one, a drive
+# not plugged in) and cannot go stale.
+function Clear-RecentMap {
+    $script:recentMap = @{ $script:RECENT_CLEARED_KEY = [pscustomobject]@{
+        Hidden = [DateTime]::Now.ToString('s') } }
     Save-RecentMap
 }
 # Video history (Files tabs): play counts tracked here per machine, and
@@ -1730,14 +1809,17 @@ function Get-ResumeEntries {
 # launch rather than the exact minute. Nothing worth a redraw loop for.
 function Sort-Games($list) {
     $list = @($list | Where-Object { -not $_.Unselectable })   # strip old section rows before re-sorting
-    if (-not $script:recentEnabled -or $script:recentMap.Count -eq 0) { return @($list) }
+    # (No empty-recentMap shortcut: with nothing of our own recorded, Steam's
+    # own LastPlayed stamps can still fill the section.)
+    if (-not $script:recentEnabled) { return @($list) }
     $recent = @(); $rest = @()
     foreach ($g in $list) {
         if (Test-RecentGame $g) { $recent += $g } else { $rest += $g }
     }
     if ($recent.Count -eq 0) { return @($rest) }
     $recent = @($recent | Sort-Object {
-        try { [DateTime]$script:recentMap[[string]$_.AppId].Last } catch { [DateTime]::MinValue }
+        $s = Get-RecentStamp $_
+        if ($null -eq $s) { [DateTime]::MinValue } else { $s }
     } -Descending)
     $out = @([pscustomobject]@{ Name = 'RECENTLY PLAYED'; Unselectable = $true })
     $out += $recent
@@ -3411,7 +3493,7 @@ function Invoke-SettingsAction([string]$key) {
             Save-Settings
             # The cached per-app totals were built under the old rule, so
             # drop them; the next paint re-reads localconfig.vdf fresh.
-            $script:steamPlaytime = $null
+            Clear-SteamLocalConfigCache
         }
         'SessionTime' {
             $script:sessionTimeOn = -not $script:sessionTimeOn
@@ -3680,7 +3762,7 @@ function Invoke-GameUninstall($g, [string]$name) {
     Show-MenuWindow   # however it went, the user ends up back here
     try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
     Add-MaProfileTags $games
-    $script:steamPlaytime = $null   # an uninstall leaves the playtime behind; re-read anyway
+    Clear-SteamLocalConfigCache   # an uninstall leaves the playtime behind; re-read anyway
     Build-Tabs
     $script:items = @(Get-TabItems $script:tab)
     $script:selected = [Math]::Min($script:selected, [Math]::Max(0, $script:items.Count - 1))
@@ -4302,8 +4384,11 @@ try {
                                 $sure = Pick-Option "CLEAR $what - ARE YOU SURE?" @('Yes - clear it', 'Cancel')
                                 if ($sure -eq 0) {
                                     if ($c -eq 0 -or $c -eq 2) {
-                                        $script:recentMap = @{}
-                                        Remove-Item (Join-Path $script:dataDir 'recent.json') -Force -ErrorAction SilentlyContinue
+                                        # Writes a tombstone rather than deleting
+                                        # the file: Steam's own LastPlayed stamps
+                                        # would otherwise refill the section on
+                                        # the spot. See Clear-RecentMap.
+                                        Clear-RecentMap
                                     }
                                     if ($c -eq 1 -or $c -eq 2) {
                                         $script:watchMap = @{}
@@ -4768,9 +4853,9 @@ try {
                     $landedAt = [DateTime]::Now
                 }
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
-                # Steam has just written a fresh playtime for this game (or
-                # is about to), so the cached figures are stale.
-                $script:steamPlaytime = $null
+                # Steam has just written a fresh playtime and LastPlayed for
+                # this game (or is about to), so both caches are stale.
+                Clear-SteamLocalConfigCache
                 if ($script:recentEnabled -and $script:launchResult -eq 'Started') {
                     Record-Play $g
                     # bubble the just-played game to the top of every game tab
