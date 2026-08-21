@@ -808,6 +808,12 @@ function Place-Osd {
 $script:isFull       = $true
 $script:winBounds    = $null    # last windowed frame, so the toggle round-trips
 $script:cursorHidden = $false   # Cursor.Hide/Show keep a COUNT - never call the same one twice
+# Up while a mode toggle is rearranging the frame. WinForms raises Resize
+# and Move from inside those property setters, and the frame is mid-change
+# when they fire - a half-applied rectangle is not a windowed frame worth
+# remembering. Only the handlers' winBounds capture honours this; their
+# strip re-fit is harmless either way.
+$script:switching    = $false
 
 # Windowed, this window IS CLInt as far as the eye goes - the fullscreen
 # menu (painted with the wrap screen) hanging around behind a small film
@@ -861,7 +867,8 @@ function Set-PlayerDisplay([bool]$full) {
     # does. Off only for the toggle itself - the menu key's minimize keeps
     # its glide.
     try { [CLIntVlc.N]::SetTransitions($form.Handle, $false) } catch {}
-    $script:isFull = $full
+    $script:isFull   = $full
+    $script:switching = $true
     if ($full) {
         # Through Normal first: a border change while Maximized keeps the
         # OLD maximized bounds, leaving the border's ghost around the
@@ -875,6 +882,26 @@ function Set-PlayerDisplay([bool]$full) {
         # never seen returning.
         Set-MenuVisible $true
     } else {
+        # Where the window is going, settled BEFORE anything moves. It has
+        # to be decided first: leaving Maximized restores the form to its
+        # OWN bounds, and for a film that launched fullscreen those have
+        # never been set - they are still WinForms' 300x300 default. Read
+        # after the fact (directly, or through the Resize this branch
+        # raises) that default becomes the answer, which is the tiny window
+        # this default exists to prevent.
+        if (-not $script:winBounds) {
+            # First time out: 75% of the working area, centred - the same
+            # miniature proportion CLInt's own windowed menu uses. Measured
+            # off the screen the film is playing on, which is still the
+            # fullscreen one at this point.
+            $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
+            $w  = [Math]::Max(320, [int]($wa.Width  * 0.75))
+            $h  = [Math]::Max(240, [int]($wa.Height * 0.75))
+            $script:winBounds = New-Object Drawing.Rectangle(
+                ($wa.X + [int](($wa.Width - $w) / 2)),
+                ($wa.Y + [int](($wa.Height - $h) / 2)), $w, $h)
+        }
+        $target = $script:winBounds
         # Menu away BEFORE the frame shrinks, so what the window reveals
         # is the desktop, never a fullscreen CLInt mid-vanish.
         Set-MenuVisible $false
@@ -884,22 +911,19 @@ function Set-PlayerDisplay([bool]$full) {
         $form.TopMost         = $false
         $form.FormBorderStyle = 'Sizable'
         $form.WindowState     = 'Normal'
-        if (-not $script:winBounds) {
-            # First time out: 75% of the working area, centred - the same
-            # miniature proportion CLInt's own windowed menu uses.
-            $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
-            $w  = [Math]::Max(320, [int]($wa.Width  * 0.75))
-            $h  = [Math]::Max(240, [int]($wa.Height * 0.75))
-            $script:winBounds = New-Object Drawing.Rectangle(
-                ($wa.X + [int](($wa.Width - $w) / 2)),
-                ($wa.Y + [int](($wa.Height - $h) / 2)), $w, $h)
-        }
-        $form.Bounds = $script:winBounds
+        $form.Bounds = $target
         if ($script:cursorHidden) { [Windows.Forms.Cursor]::Show(); $script:cursorHidden = $false }
     }
     # The state changes above complete inside their setters, so the
     # animation window is already past - this cannot re-animate them.
     try { [CLIntVlc.N]::SetTransitions($form.Handle, $true) } catch {}
+    $script:switching = $false
+    # The frame the toggle just settled on IS the windowed frame to come
+    # back to - recorded here, now that it is whole, rather than from the
+    # events the setters raised on the way.
+    if (-not $script:isFull -and $form.WindowState -eq 'Normal') {
+        $script:winBounds = $form.Bounds
+    }
     Place-Osd
 }
 
@@ -1382,7 +1406,8 @@ $form.Add_Resize({
     }
     # Any other size change - a windowed resize, a maximize, a mode toggle,
     # a restore - re-fits the strip to the new frame.
-    if (-not $script:isFull -and $form.WindowState -eq 'Normal') { $script:winBounds = $form.Bounds }
+    if (-not $script:switching -and -not $script:isFull -and
+        $form.WindowState -eq 'Normal') { $script:winBounds = $form.Bounds }
     Place-Osd
     if ($script:mp -ne [IntPtr]::Zero -and $script:paused) {
         # Back on screen: the strip says why the picture is not moving,
@@ -1396,7 +1421,7 @@ $form.Add_Resize({
 # position is ours to chase.
 $form.Add_Move({
     if (-not $script:quitting -and $form.WindowState -eq 'Normal') {
-        if (-not $script:isFull) { $script:winBounds = $form.Bounds }
+        if (-not $script:switching -and -not $script:isFull) { $script:winBounds = $form.Bounds }
         Place-Osd
     }
 })
