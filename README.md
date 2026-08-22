@@ -75,6 +75,12 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   had them, and Motion Assistant is never restarted. Your choices per game
   live in `data\gyro-settings.json`.
 
+  Switching gyro back off works the same way round: when you return to the
+  menu, Motion Assistant applies the profile for CLInt itself, so CLInt
+  makes sure that one has gyro switched off. Motion Assistant checks which
+  program is in front every few seconds, so gyro can stay live for a moment
+  after a game closes.
+
   If gyro is already switched on in Motion Assistant, CLInt leaves it
   alone rather than switching it off after a game.
 

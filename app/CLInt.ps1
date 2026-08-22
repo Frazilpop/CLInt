@@ -645,9 +645,14 @@ Add-MaProfileTags $games
 # already re-reads when it detects a game (the same read that stomps
 # launch-time TDP - see Assert-Tdp) costs neither.
 #
-# Reverting is belt-and-braces: CLInt writes the previous value back on
-# exit, and MA independently applies Process\powershell.ini - which carries
-# AutoSimulate=False - the moment the menu holds the foreground again.
+# Reverting takes two writes, not one. MA notices the foreground process has
+# changed (it checks every few seconds), applies the profile for whatever is
+# now in front, and that profile's AutoSimulate decides the gyro's fate -
+# so putting the game's own key back does NOT switch anything off: the file
+# MA reads on the way back is a DIFFERENT one. When the menu returns to the
+# front MA applies Process\<menu process>.ini (powershell.ini - CLInt is a
+# PowerShell script in a console) if one exists, else the current general
+# profile. Whatever THAT says wins, so CLInt makes it say off.
 $maGlobalIni     = Join-Path $maDir 'Profiles\Global.ini'
 $gyroEnabled     = Test-Path $maGlobalIni      # no MA, no feature, no rows
 $gyroFile        = Join-Path $script:dataDir 'gyro-settings.json'
@@ -715,6 +720,42 @@ function Get-MaGyroProfile($game) {
     return (Join-Path $script:maDir "Profiles\General\$last.ini")
 }
 
+# The profile MA applies once the menu is back in front, chosen the same way
+# as a game's: our own process profile when there is one (MA keys those on
+# Process.ProcessName of the foreground window's owner, so 'powershell'),
+# otherwise the current general profile.
+function Get-MaMenuProfile {
+    $own = ''
+    try { $own = (Get-Process -Id $PID).ProcessName } catch {}
+    if ($own) {
+        $p = Join-Path $script:maDir "Profiles\Process\$own.ini"
+        if (Test-Path $p) { return $p }
+    }
+    $last = Read-MaIni $script:maGlobalIni 'lastFile'
+    if (-not $last) { $last = 'default' }
+    return (Join-Path $script:maDir "Profiles\General\$last.ini")
+}
+
+# This is the actual off switch: the profile above is the one MA re-reads on
+# the way back to the menu, so a True in it keeps the gyro running no matter
+# what CLInt puts back in the game's profile. Written only when it is really
+# True - a machine that never uses this feature never gets its MA config
+# touched, and the usual case costs a single read. Gyro on in the menu is
+# not a preference CLInt can honour: it would drive the mouse pointer around
+# a launcher, and it would make per-game gyro meaningless.
+# $except guards the one case where the two profiles are the same file: a
+# game with no MA profile of its own, on a machine where the menu process has
+# none either, resolves both to the current general profile - and turning the
+# gyro off there a moment after turning it on would undo the launch.
+function Assert-MenuGyroOff([string]$except) {
+    $p = Get-MaMenuProfile
+    if (-not $p -or -not (Test-Path $p)) { return }
+    if ($except -and $p -eq $except) { return }
+    if ((Read-MaIni $p 'AutoSimulate') -eq 'True') {
+        Write-MaIni $p 'AutoSimulate' 'False' | Out-Null
+    }
+}
+
 # Turn gyro on for this launch, handing back what to put in the key
 # afterwards. The pending change is written to data\ first: if CLInt dies
 # while the game is running nothing else would ever put MA's key back, and
@@ -732,6 +773,10 @@ function Set-GameGyroOn($game) {
         try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
         return $null
     }
+    # Arm the off switch in the same breath as the on switch, so the two can
+    # never drift apart: whatever happens to this launch, coming back to the
+    # menu lands on a profile that says off.
+    Assert-MenuGyroOff $path
     return [pscustomobject]@{ Path = $path; Prev = $prev }
 }
 
@@ -740,14 +785,18 @@ function Restore-GameGyro($state) {
     $v = $state.Prev
     if (-not $v) { $v = 'False' }   # key was absent: off is the resting value
     Write-MaIni $state.Path 'AutoSimulate' $v | Out-Null
+    Assert-MenuGyroOff
     try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
 }
 
 # A previous session was killed with gyro still turned on for a game: put
 # MA's key back before anything reads it, so a crash cannot leak a gyro
-# setting into every game that follows.
+# setting into every game that follows. The menu's own profile gets the same
+# treatment - after a crash the gyro may still be running, and that profile
+# is the only thing that will ever stop it.
 function Repair-GyroState {
     if (-not (Test-Path $script:gyroRestoreFile)) { return }
+    Assert-MenuGyroOff
     try {
         $bits = ((Get-Content $script:gyroRestoreFile -Raw).Trim() -split "`t", 2)
         if ($bits.Count -ge 1 -and $bits[0] -and (Test-Path $bits[0])) {
@@ -5024,10 +5073,10 @@ try {
                     $landedAt = [DateTime]::Now
                 }
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
-                # MA has already switched the gyro off by applying its own
-                # powershell profile now the menu is back in front; this puts
-                # the key itself back so the next game starts from the user's
-                # own setting rather than inheriting this one.
+                # Puts the game's key back so the next game starts from the
+                # user's own setting, and makes sure the profile MA reads now
+                # the menu is in front says off - that read, a few seconds
+                # from now, is what actually stops the gyro.
                 Restore-GameGyro $gyroState
                 # Steam has just written a fresh playtime and LastPlayed for
                 # this game (or is about to), so both caches are stale.
