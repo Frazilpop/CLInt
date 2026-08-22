@@ -60,6 +60,26 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   
   This feature is auto-detected and hidden if Motion Assistant is not installed.
 
+## Gyro – Motion Assistant support (for WIN GPD Devices)
+
+  Per-game gyro aiming, for handhelds whose Motion Assistant provides it.
+  Press **Y** on a game and choose **Turn gyro on for this game**; the row
+  then carries a `[GYRO]` tag. Gyro switches on as the game starts and off
+  again when it exits, so it is on only for the games you asked for.
+
+  It works by flipping Motion Assistant's own `AutoSimulate` switch in the
+  profile it is going to apply for that game — its per-game profile if it
+  has one, otherwise whichever general profile is currently selected — and
+  putting the previous value back afterwards. Nothing else in that profile
+  is touched, so fan curves, TDP and GPU settings are left exactly as you
+  had them, and Motion Assistant is never restarted. Your choices per game
+  live in `data\gyro-settings.json`.
+
+  If gyro is already switched on in Motion Assistant, CLInt leaves it
+  alone rather than switching it off after a game.
+
+  This feature is auto-detected and hidden if Motion Assistant is not installed.
+
 ## Video player
 
 Videos open in CLInt's own player, unless you switch back to your usual

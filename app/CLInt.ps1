@@ -624,6 +624,143 @@ function Add-MaProfileTags($list) {
 }
 Add-MaProfileTags $games
 
+# --------------------------------------------------------------- GYRO ---
+# Per-game gyro - Motion Assistant's motion-to-mouse/stick simulation -
+# applied when a game starts and put back when it exits, like the TDP
+# override above.
+#
+# There is no standalone lever for this the way ryzenadj is for TDP: the
+# gyro pipeline is MA's own, so the switch has to be MA's too. That switch
+# is the AutoSimulate key - whenever MA applies a profile it drives its own
+# "enable gyroscope" control straight from that key, so True means gyro is
+# on for as long as that profile is the applied one.
+#
+# So CLInt flips that ONE key in the profile MA is going to apply for this
+# game anyway. Deliberately NOT a per-game MA profile: applying a profile
+# applies the whole of it - fan curves, TDP, GPU clock, DisableOC - so a
+# profile invented just to carry a gyro flag would quietly replace every
+# other setting the active one holds. And MA only learns about new profiles
+# at its own startup, so a new file would need MA restarted, which drops fan
+# control long enough for the fans to spin up loud. Editing the file MA
+# already re-reads when it detects a game (the same read that stomps
+# launch-time TDP - see Assert-Tdp) costs neither.
+#
+# Reverting is belt-and-braces: CLInt writes the previous value back on
+# exit, and MA independently applies Process\powershell.ini - which carries
+# AutoSimulate=False - the moment the menu holds the foreground again.
+$maGlobalIni     = Join-Path $maDir 'Profiles\Global.ini'
+$gyroEnabled     = Test-Path $maGlobalIni      # no MA, no feature, no rows
+$gyroFile        = Join-Path $script:dataDir 'gyro-settings.json'
+$gyroRestoreFile = Join-Path $script:dataDir 'gyro-restore.txt'
+
+# Presence is the setting, like $tdpMap's non-zero entries: a game is either
+# in here or it is not.
+$gyroMap = @{}
+if (Test-Path $gyroFile) {
+    try {
+        (Get-Content $gyroFile -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { if ([bool]$_.Value) { $gyroMap[$_.Name] = $true } }
+    } catch {}
+}
+
+# $script: qualified throughout this block, not just on the writes: an
+# unqualified read resolves dynamically and a caller's own $gyroMap would
+# shadow it (see the $h/$W note further down - the same trap).
+function Save-GyroMap {
+    [pscustomobject]$script:gyroMap | ConvertTo-Json | Set-Content $script:gyroFile -Encoding utf8
+}
+
+function Get-GameGyro($game) {
+    if (-not $game) { return $false }
+    return $script:gyroMap.ContainsKey([string]$game.AppId)
+}
+
+# MA's profiles are INIs whose keys sit in a single *unnamed* section (the
+# file literally starts "[]"), read and written through the same Windows API
+# MA itself uses - ANSI entry points, empty section name - so CLInt cannot
+# disagree with it about encoding or file layout, and every key it is not
+# touching is left byte-for-byte alone.
+try {
+    Add-Type -Namespace CLIntIni -Name Api -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+public static extern int GetPrivateProfileString(string section, string key, string def,
+                                                System.Text.StringBuilder ret, int size, string path);
+[DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+public static extern bool WritePrivateProfileString(string section, string key, string val, string path);
+'@
+} catch {}
+
+function Read-MaIni([string]$path, [string]$key) {
+    try {
+        $sb = New-Object System.Text.StringBuilder 512
+        [void][CLIntIni.Api]::GetPrivateProfileString('', $key, '', $sb, 512, $path)
+        return $sb.ToString()
+    } catch { return '' }
+}
+
+function Write-MaIni([string]$path, [string]$key, [string]$value) {
+    try { return [CLIntIni.Api]::WritePrivateProfileString('', $key, $value, $path) }
+    catch { return $false }
+}
+
+# The profile MA will actually apply for this game: its own process profile
+# when it has one (MA prefers those over the general profile), otherwise
+# whichever general profile is current - Global.ini's lastFile names it.
+function Get-MaGyroProfile($game) {
+    if ($game.MaProfile) {
+        return (Join-Path $script:maDir "Profiles\Process\$($game.MaProfile).ini")
+    }
+    $last = Read-MaIni $script:maGlobalIni 'lastFile'
+    if (-not $last) { $last = 'default' }
+    return (Join-Path $script:maDir "Profiles\General\$last.ini")
+}
+
+# Turn gyro on for this launch, handing back what to put in the key
+# afterwards. The pending change is written to data\ first: if CLInt dies
+# while the game is running nothing else would ever put MA's key back, and
+# every later game would inherit a gyro setting nobody asked for.
+function Set-GameGyroOn($game) {
+    $path = Get-MaGyroProfile $game
+    if (-not $path -or -not (Test-Path $path)) { return $null }
+    $prev = Read-MaIni $path 'AutoSimulate'
+    # Already on - the user's own setting. Nothing to change, and nothing to
+    # undo afterwards either: switching it off on exit would be CLInt taking
+    # away something it never turned on.
+    if ($prev -eq 'True') { return $null }
+    try { "$path`t$prev" | Set-Content $script:gyroRestoreFile -Encoding utf8 } catch {}
+    if (-not (Write-MaIni $path 'AutoSimulate' 'True')) {
+        try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
+        return $null
+    }
+    return [pscustomobject]@{ Path = $path; Prev = $prev }
+}
+
+function Restore-GameGyro($state) {
+    if (-not $state) { return }
+    $v = $state.Prev
+    if (-not $v) { $v = 'False' }   # key was absent: off is the resting value
+    Write-MaIni $state.Path 'AutoSimulate' $v | Out-Null
+    try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+# A previous session was killed with gyro still turned on for a game: put
+# MA's key back before anything reads it, so a crash cannot leak a gyro
+# setting into every game that follows.
+function Repair-GyroState {
+    if (-not (Test-Path $script:gyroRestoreFile)) { return }
+    try {
+        $bits = ((Get-Content $script:gyroRestoreFile -Raw).Trim() -split "`t", 2)
+        if ($bits.Count -ge 1 -and $bits[0] -and (Test-Path $bits[0])) {
+            $v = ''
+            if ($bits.Count -eq 2) { $v = $bits[1].Trim() }
+            if (-not $v) { $v = 'False' }
+            Write-MaIni $bits[0] 'AutoSimulate' $v | Out-Null
+        }
+    } catch {}
+    try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
+}
+if ($gyroEnabled) { Repair-GyroState }
+
 if ($List) {
     if ($games.Count -eq 0) { Write-Host "No installed Steam games found."; exit 1 }
     $games |
@@ -2480,6 +2617,9 @@ function Draw-GameLine([int]$i) {
         $tdp = Get-GameTdp $items[$i]
         if ($items[$i].MaProfile) { $label += "  [MA profile]" }
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
+        # After the wattage: the two read as one power-and-input strip, and
+        # a game can carry both.
+        if ($script:gyroEnabled -and (Get-GameGyro $items[$i])) { $label += "  [GYRO]" }
         # Steam's own lifetime playtime, and only for real Steam games -
         # a non-Steam shortcut has none on record, so it gets no tag rather
         # than a number that would mean something different on every row.
@@ -3677,6 +3817,14 @@ function Show-GameMenu($g) {
     if ($script:recentEnabled -and (Test-RecentGame $g)) {
         $opts += 'Remove from recently played'; $acts += 'unrecent'
     }
+    # Specialist enough to live only here - no keybind of its own - and only
+    # where Motion Assistant is around to act on it. Skipped for shortcuts
+    # that merely open something: nothing is played, so there is no session
+    # to turn the gyro on for.
+    if ($script:gyroEnabled -and $g.Track -ne 'Window') {
+        if (Get-GameGyro $g) { $opts += 'Turn gyro off for this game'; $acts += 'gyrooff' }
+        else                 { $opts += 'Turn gyro on for this game';  $acts += 'gyroon' }
+    }
     # Uninstalling is Steam's business: a non-Steam shortcut is just a path
     # Steam was told about, so there is nothing to remove and nothing to
     # say about it.
@@ -3687,8 +3835,21 @@ function Show-GameMenu($g) {
     if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
     switch ($acts[$c]) {
         'unrecent'  { Remove-RecentGame $g }
+        'gyroon'    { Set-GameGyroPref $g $true }
+        'gyrooff'   { Set-GameGyroPref $g $false }
         'uninstall' { Invoke-GameUninstall $g $name }
     }
+}
+
+# The preference only - MA's own file is not touched until the game is
+# actually launched, so nothing about the machine changes from in here.
+function Set-GameGyroPref($g, [bool]$on) {
+    $k = [string]$g.AppId
+    if ($on) { $script:gyroMap[$k] = $true } else { $script:gyroMap.Remove($k) }
+    Save-GyroMap
+    Draw-All                     # Pick-Option cleared the screen
+    if ($on) { Show-Notice "Gyro will be on while $($g.Name) is running." }
+    else     { Show-Notice "Gyro off for $($g.Name)." }
 }
 
 # Out of the section and back into the A-Z list below it - with the cursor
@@ -4814,6 +4975,16 @@ try {
                     Set-Tdp $tdpWatts ($tdpWatts + 1) $tdpWatts
                     Write-Host "   TDP: $($tdpWatts)W (reverts on exit)" -ForegroundColor $theme.Notice
                 }
+                # Flip MA's gyro key before the game exists: MA reads the
+                # profile when it detects the new process, so the value has
+                # to already be there for that read to pick it up.
+                $gyroState = $null
+                if ($script:gyroEnabled -and -not $opening -and (Get-GameGyro $g)) {
+                    $gyroState = Set-GameGyroOn $g
+                    if ($gyroState) {
+                        Write-Host "   Gyro: on (reverts on exit)" -ForegroundColor $theme.Notice
+                    }
+                }
                 $steamCold = $cur.Type -eq 'Steam' -and
                              -not (Get-Process steam -ErrorAction SilentlyContinue)
                 if ($steamCold) {
@@ -4853,6 +5024,11 @@ try {
                     $landedAt = [DateTime]::Now
                 }
                 if ($prevTdp) { Set-Tdp $prevTdp.Stapm $prevTdp.Fast $prevTdp.Slow }
+                # MA has already switched the gyro off by applying its own
+                # powershell profile now the menu is back in front; this puts
+                # the key itself back so the next game starts from the user's
+                # own setting rather than inheriting this one.
+                Restore-GameGyro $gyroState
                 # Steam has just written a fresh playtime and LastPlayed for
                 # this game (or is about to), so both caches are stale.
                 Clear-SteamLocalConfigCache
