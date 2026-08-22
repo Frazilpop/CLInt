@@ -928,8 +928,9 @@ function Set-PlayerDisplay([bool]$full) {
 }
 
 function Toggle-PlayerDisplay {
+    # No note: the frame changing IS the feedback. A word for what you can
+    # already see just sits over the film.
     Set-PlayerDisplay (-not $script:isFull)
-    Show-Note $(if ($script:isFull) { 'Fullscreen' } else { 'Windowed' }) 2000
 }
 
 # A windowed launch takes effect HERE, before the form ever shows, so the
