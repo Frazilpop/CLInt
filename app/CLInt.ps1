@@ -653,18 +653,35 @@ Add-MaProfileTags $games
 # front MA applies Process\<menu process>.ini (powershell.ini - CLInt is a
 # PowerShell script in a console) if one exists, else the current general
 # profile. Whatever THAT says wins, so CLInt makes it say off.
+#
+# What the gyro then DRIVES is a second key in the same file, simulateType:
+# 'Mouse' moves the pointer, 'Xbox' feeds a virtual Xbox pad whose stick the
+# gyro moves (which stick is MA's own XboxType setting, normally the right).
+# MA has two more values, DS4 and DS4Stick, deliberately not offered - the
+# two here are the ones a game cares about, and every extra row is a row to
+# read. Both keys are written together on launch and put back together on
+# exit, so a mode is only ever in force for the game that asked for it.
+$GYRO_MOUSE = 'Mouse'
+$GYRO_STICK = 'Xbox'      # MA's own enum name, written verbatim into the ini
 $maGlobalIni     = Join-Path $maDir 'Profiles\Global.ini'
 $gyroEnabled     = Test-Path $maGlobalIni      # no MA, no feature, no rows
 $gyroFile        = Join-Path $script:dataDir 'gyro-settings.json'
 $gyroRestoreFile = Join-Path $script:dataDir 'gyro-restore.txt'
 
-# Presence is the setting, like $tdpMap's non-zero entries: a game is either
-# in here or it is not.
+# Presence is still the on/off setting, like $tdpMap's non-zero entries, but
+# the value now carries the mode as well. Entries written before there were
+# modes are a bare true: they load as Mouse, which is what they have been
+# doing all along (every MA profile ships simulateType=Mouse), so nothing
+# about an existing choice changes under the user.
 $gyroMap = @{}
 if (Test-Path $gyroFile) {
     try {
         (Get-Content $gyroFile -Raw | ConvertFrom-Json).PSObject.Properties |
-            ForEach-Object { if ([bool]$_.Value) { $gyroMap[$_.Name] = $true } }
+            ForEach-Object {
+                $v = $_.Value
+                if ($v -is [bool]) { if ($v) { $gyroMap[$_.Name] = $GYRO_MOUSE } }
+                elseif ("$v" -in @($GYRO_MOUSE, $GYRO_STICK)) { $gyroMap[$_.Name] = "$v" }
+            }
     } catch {}
 }
 
@@ -675,9 +692,19 @@ function Save-GyroMap {
     [pscustomobject]$script:gyroMap | ConvertTo-Json | Set-Content $script:gyroFile -Encoding utf8
 }
 
+# The mode this game is set to, or $null for off - so the callers that only
+# want to know whether gyro is on can still just test it for truth.
 function Get-GameGyro($game) {
-    if (-not $game) { return $false }
-    return $script:gyroMap.ContainsKey([string]$game.AppId)
+    if (-not $game) { return $null }
+    $k = [string]$game.AppId
+    if ($script:gyroMap.ContainsKey($k)) { return $script:gyroMap[$k] }
+    return $null
+}
+
+# 'Mouse' / 'Xbox' are MA's words; these are the ones the user sees.
+function Get-GyroModeLabel([string]$mode) {
+    if ($mode -eq $script:GYRO_STICK) { return 'stick' }
+    return 'mouse'
 }
 
 # MA's profiles are INIs whose keys sit in a single *unnamed* section (the
@@ -760,16 +787,27 @@ function Assert-MenuGyroOff([string]$except) {
 # afterwards. The pending change is written to data\ first: if CLInt dies
 # while the game is running nothing else would ever put MA's key back, and
 # every later game would inherit a gyro setting nobody asked for.
-function Set-GameGyroOn($game) {
+function Set-GameGyroOn($game, [string]$mode) {
     $path = Get-MaGyroProfile $game
     if (-not $path -or -not (Test-Path $path)) { return $null }
+    if (-not $mode) { $mode = $script:GYRO_MOUSE }
     $prev = Read-MaIni $path 'AutoSimulate'
     # Already on - the user's own setting. Nothing to change, and nothing to
     # undo afterwards either: switching it off on exit would be CLInt taking
-    # away something it never turned on.
+    # away something it never turned on. The mode is left alone with it: this
+    # profile is running the user's gyro right now, and steering it somewhere
+    # else would be the same overreach by a different key.
     if ($prev -eq 'True') { return $null }
-    try { "$path`t$prev" | Set-Content $script:gyroRestoreFile -Encoding utf8 } catch {}
+    $prevType = Read-MaIni $path 'simulateType'
+    # Both previous values go to disk before either key moves, so a crash
+    # mid-game leaves a complete record to put back - see Repair-GyroState.
+    try { "$path`t$prev`t$prevType" | Set-Content $script:gyroRestoreFile -Encoding utf8 } catch {}
+    # Mode first: MA reads the whole profile in one pass when it spots the
+    # game, and AutoSimulate is what that pass acts on, so it is the value
+    # that must be last in place.
+    Write-MaIni $path 'simulateType' $mode | Out-Null
     if (-not (Write-MaIni $path 'AutoSimulate' 'True')) {
+        if ($prevType) { Write-MaIni $path 'simulateType' $prevType | Out-Null }
         try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
         return $null
     }
@@ -777,7 +815,7 @@ function Set-GameGyroOn($game) {
     # never drift apart: whatever happens to this launch, coming back to the
     # menu lands on a profile that says off.
     Assert-MenuGyroOff $path
-    return [pscustomobject]@{ Path = $path; Prev = $prev }
+    return [pscustomobject]@{ Path = $path; Prev = $prev; PrevType = $prevType }
 }
 
 function Restore-GameGyro($state) {
@@ -785,6 +823,10 @@ function Restore-GameGyro($state) {
     $v = $state.Prev
     if (-not $v) { $v = 'False' }   # key was absent: off is the resting value
     Write-MaIni $state.Path 'AutoSimulate' $v | Out-Null
+    # An absent simulateType is left absent rather than invented: MA falls
+    # back to Mouse for a missing key, and writing one in would be CLInt
+    # adding a line to a file it was only meant to borrow.
+    if ($state.PrevType) { Write-MaIni $state.Path 'simulateType' $state.PrevType | Out-Null }
     Assert-MenuGyroOff
     try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
 }
@@ -798,12 +840,19 @@ function Repair-GyroState {
     if (-not (Test-Path $script:gyroRestoreFile)) { return }
     Assert-MenuGyroOff
     try {
-        $bits = ((Get-Content $script:gyroRestoreFile -Raw).Trim() -split "`t", 2)
+        # path <TAB> AutoSimulate <TAB> simulateType. A file written before
+        # there were modes has only the first two fields, and restoring just
+        # the switch is exactly right for it - it never moved the other key.
+        $bits = ((Get-Content $script:gyroRestoreFile -Raw).Trim() -split "`t")
         if ($bits.Count -ge 1 -and $bits[0] -and (Test-Path $bits[0])) {
             $v = ''
-            if ($bits.Count -eq 2) { $v = $bits[1].Trim() }
+            if ($bits.Count -ge 2) { $v = $bits[1].Trim() }
             if (-not $v) { $v = 'False' }
             Write-MaIni $bits[0] 'AutoSimulate' $v | Out-Null
+            if ($bits.Count -ge 3) {
+                $t = $bits[2].Trim()
+                if ($t) { Write-MaIni $bits[0] 'simulateType' $t | Out-Null }
+            }
         }
     } catch {}
     try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
@@ -2668,7 +2717,10 @@ function Draw-GameLine([int]$i) {
         elseif ($tdp)             { $label += "  [$($tdp)W]" }
         # After the wattage: the two read as one power-and-input strip, and
         # a game can carry both.
-        if ($script:gyroEnabled -and (Get-GameGyro $items[$i])) { $label += "  [GYRO]" }
+        if ($script:gyroEnabled) {
+            $gm = Get-GameGyro $items[$i]
+            if ($gm) { $label += "  [GYRO " + (Get-GyroModeLabel $gm).ToUpper() + "]" }
+        }
         # Steam's own lifetime playtime, and only for real Steam games -
         # a non-Steam shortcut has none on record, so it gets no tag rather
         # than a number that would mean something different on every row.
@@ -3870,9 +3922,20 @@ function Show-GameMenu($g) {
     # where Motion Assistant is around to act on it. Skipped for shortcuts
     # that merely open something: nothing is played, so there is no session
     # to turn the gyro on for.
+    # The mode row only exists once gyro is on for this game - on its own it
+    # would set nothing running, and a row that does nothing is worse than a
+    # row that is not there. Two modes, so it switches rather than opening a
+    # list: it names the one it will move to, which says what the current
+    # one is without a second line to read.
     if ($script:gyroEnabled -and $g.Track -ne 'Window') {
-        if (Get-GameGyro $g) { $opts += 'Turn gyro off for this game'; $acts += 'gyrooff' }
-        else                 { $opts += 'Turn gyro on for this game';  $acts += 'gyroon' }
+        $gmode = Get-GameGyro $g
+        if ($gmode) {
+            $opts += 'Turn gyro off for this game'; $acts += 'gyrooff'
+            if ($gmode -eq $script:GYRO_STICK) { $opts += 'Switch gyro to mouse'; $acts += 'gyromouse' }
+            else                               { $opts += 'Switch gyro to stick'; $acts += 'gyrostick' }
+        } else {
+            $opts += 'Turn gyro on for this game'; $acts += 'gyroon'
+        }
     }
     # Uninstalling is Steam's business: a non-Steam shortcut is just a path
     # Steam was told about, so there is nothing to remove and nothing to
@@ -3884,21 +3947,23 @@ function Show-GameMenu($g) {
     if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
     switch ($acts[$c]) {
         'unrecent'  { Remove-RecentGame $g }
-        'gyroon'    { Set-GameGyroPref $g $true }
-        'gyrooff'   { Set-GameGyroPref $g $false }
+        'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
+        'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
+        'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
+        'gyrooff'   { Set-GameGyroPref $g $null }
         'uninstall' { Invoke-GameUninstall $g $name }
     }
 }
 
 # The preference only - MA's own file is not touched until the game is
 # actually launched, so nothing about the machine changes from in here.
-function Set-GameGyroPref($g, [bool]$on) {
+function Set-GameGyroPref($g, [string]$mode) {
     $k = [string]$g.AppId
-    if ($on) { $script:gyroMap[$k] = $true } else { $script:gyroMap.Remove($k) }
+    if ($mode) { $script:gyroMap[$k] = $mode } else { $script:gyroMap.Remove($k) }
     Save-GyroMap
     Draw-All                     # Pick-Option cleared the screen
-    if ($on) { Show-Notice "Gyro will be on while $($g.Name) is running." }
-    else     { Show-Notice "Gyro off for $($g.Name)." }
+    if ($mode) { Show-Notice "Gyro will move the $(Get-GyroModeLabel $mode) while $($g.Name) is running." }
+    else       { Show-Notice "Gyro off for $($g.Name)." }
 }
 
 # Out of the section and back into the A-Z list below it - with the cursor
@@ -5028,10 +5093,12 @@ try {
                 # profile when it detects the new process, so the value has
                 # to already be there for that read to pick it up.
                 $gyroState = $null
-                if ($script:gyroEnabled -and -not $opening -and (Get-GameGyro $g)) {
-                    $gyroState = Set-GameGyroOn $g
+                $gyroMode  = $null
+                if ($script:gyroEnabled -and -not $opening) { $gyroMode = Get-GameGyro $g }
+                if ($gyroMode) {
+                    $gyroState = Set-GameGyroOn $g $gyroMode
                     if ($gyroState) {
-                        Write-Host "   Gyro: on (reverts on exit)" -ForegroundColor $theme.Notice
+                        Write-Host "   Gyro: $(Get-GyroModeLabel $gyroMode) (reverts on exit)" -ForegroundColor $theme.Notice
                     }
                 }
                 $steamCold = $cur.Type -eq 'Steam' -and
