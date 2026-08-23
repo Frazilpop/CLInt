@@ -941,26 +941,58 @@ function Toggle-PlayerDisplay {
 # place.) This also hides the menu window straight away - the windowed
 # player replaces a windowed CLInt the same way it replaces a fullscreen
 # one.
-if ($Windowed) {
+#
+# Which mode that is comes from the MENU WINDOW as it stands right now,
+# not from the -Windowed switch alone. CLInt reads its console the moment
+# it hands over, but this process then takes a second or two to load
+# libvlc and put a form up - and conhost owns Alt+Enter, so the display
+# mode can flip in that gap without a key ever reaching CLInt's script
+# (which is blocked in its wait loop, where even Sync-DisplayMode does not
+# run). Someone who hits the fullscreen toggle while the film is still
+# loading means it for the FILM, and used to watch it open windowed
+# anyway. So: trust the glass, the same rule CLInt applies on its side.
+# Read in THIS process - both sides are equally DPI-(un)aware, so the
+# numbers line up.
+$openWindowed = [bool]$Windowed
+$script:menuRect = $null
+if ($script:menuHwnd -ne [IntPtr]::Zero) {
+    try {
+        $mr = New-Object CLIntVlc.N+RECT
+        if ([CLIntVlc.N]::GetWindowRect($script:menuHwnd, [ref]$mr) -and
+            ($mr.R - $mr.L) -ge 320 -and ($mr.B - $mr.T) -ge 240) {
+            $script:menuRect = New-Object Drawing.Rectangle(
+                $mr.L, $mr.T, ($mr.R - $mr.L), ($mr.B - $mr.T))
+            # A console covering its screen IS a fullscreen console:
+            # conhost's fullscreen has no frame and takes the whole
+            # monitor, while CLInt's windowed menu is a miniature of it -
+            # $windowedFontScale, 75% of the screen in each direction. The
+            # two are far enough apart that the line goes between them
+            # rather than at the edge: an exact-rect test would have to
+            # assume conhost sizes its fullscreen window to the pixel, and
+            # anything it leaves over is grid remainder we cannot predict.
+            $scrB = [Windows.Forms.Screen]::FromRectangle($script:menuRect).Bounds
+            $openWindowed = -not ($script:menuRect.Width  -ge ($scrB.Width  * 0.9) -and
+                                  $script:menuRect.Height -ge ($scrB.Height * 0.9))
+        }
+    } catch {}
+}
+if ($openWindowed) {
     # A windowed film takes the STAGE the menu occupied: same frame, same
     # spot, so the launcher and the player read as one window swapping
-    # faces rather than two windows in two places. Read in THIS process -
-    # both sides are equally DPI-(un)aware, so the numbers line up. The
-    # tick's aspect fit then trims the height to the picture's own shape.
-    # Falls back to Set-PlayerDisplay's 75%-centred default when the menu
-    # window is unknown (standalone run, stale hwnd).
-    if ($script:menuHwnd -ne [IntPtr]::Zero) {
-        try {
-            $mr = New-Object CLIntVlc.N+RECT
-            if ([CLIntVlc.N]::GetWindowRect($script:menuHwnd, [ref]$mr) -and
-                ($mr.R - $mr.L) -ge 320 -and ($mr.B - $mr.T) -ge 240) {
-                $script:winBounds = New-Object Drawing.Rectangle(
-                    $mr.L, $mr.T, ($mr.R - $mr.L), ($mr.B - $mr.T))
-            }
-        } catch {}
-    }
+    # faces rather than two windows in two places. The tick's aspect fit
+    # then trims the height to the picture's own shape. Falls back to
+    # Set-PlayerDisplay's 75%-centred default when the menu window is
+    # unknown (standalone run, stale hwnd).
+    if ($script:menuRect) { $script:winBounds = $script:menuRect }
     $form.StartPosition = 'Manual'
     Set-PlayerDisplay $false
+} elseif ($Windowed) {
+    # Handed a windowed launch, but the menu went fullscreen while we were
+    # loading. The form never passed through Maximized on the way up (see
+    # the border setup), so put it in the fullscreen shape now - pre-show,
+    # exactly where a fullscreen launch sets it - and leave $script:isFull
+    # at the $true it starts on.
+    $form.WindowState = 'Maximized'
 }
 
 # ------------------------------------------------------------- playback ---

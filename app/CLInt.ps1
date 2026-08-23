@@ -1191,6 +1191,22 @@ function Repair-MenuWindow {
     } catch {}
 }
 
+# The display mode as the WINDOW has it, which is not always what the
+# script last set - conhost owns Alt+Enter (see Sync-DisplayMode below).
+# Callers about to ACT on the mode refresh the flag first, so they act on
+# the glass rather than on a value something else changed behind them.
+# Just the flag: no font, no grid, no redraw - that is Sync-DisplayMode's
+# job, and these callers are mid-launch or mid-return with a screen of
+# their own up.
+function Update-DisplayModeFlag {
+    try {
+        $dm = [uint32]0
+        if ([CLI.Native]::GetConsoleDisplayMode([ref]$dm)) {
+            $script:isFullscreen = [bool]($dm -band 1)
+        }
+    } catch {}
+}
+
 # Alt+Enter is conhost's OWN fullscreen toggle: it flips the display mode
 # without a keypress ever reaching the script, so the font and grid work
 # the Set-Console* functions do never runs - a menu Alt+Entered into
@@ -4847,13 +4863,11 @@ try {
                         # out of the state file after the run.
                         # Trust the glass, not the flag: if anything windowed
                         # the console behind the script's back, the film must
-                        # still open matching what the eye sees.
-                        try {
-                            $dm = [uint32]0
-                            if ([CLI.Native]::GetConsoleDisplayMode([ref]$dm)) {
-                                $script:isFullscreen = [bool]($dm -band 1)
-                            }
-                        } catch {}
+                        # still open matching what the eye sees. This is only
+                        # a starting hint - the mode can change again while
+                        # the player loads, and Player.ps1 re-reads the menu
+                        # window itself before it shows anything.
+                        Update-DisplayModeFlag
                         if (-not $script:isFullscreen) { $pargs += '-Windowed' }
                         # Start-Process does not quote list items for you, so
                         # every path above carries its own quotes - without them
@@ -4944,7 +4958,21 @@ try {
                             try {
                                 if ($pstate -and $null -ne $pstate.Windowed) {
                                     $wantFull = -not [bool]$pstate.Windowed
-                                    if ($wantFull -ne $script:isFullscreen) {
+                                    # Glass again: an Alt+Enter taken while the
+                                    # script sat in the wait loop above never
+                                    # reached the flag (the idle tick, and so
+                                    # Sync-DisplayMode, does not run there). Two
+                                    # things follow. The film's mode is measured
+                                    # against what the console IS, not against a
+                                    # flag something else moved; and a console
+                                    # that drifted gets the switch applied even
+                                    # when the mode already matches, because
+                                    # conhost's own toggle flips the mode without
+                                    # the font and grid work that goes with it.
+                                    $flagWas = $script:isFullscreen
+                                    Update-DisplayModeFlag
+                                    if ($wantFull -ne $script:isFullscreen -or
+                                        $flagWas -ne $script:isFullscreen) {
                                         if ($wantFull) { Set-ConsoleFullscreen } else { Set-ConsoleWindowed }
                                         $script:landingPainted = $false
                                     }
