@@ -969,10 +969,24 @@ function Set-ConsoleFullscreen {
         }
 
         # re-grow the grid (a windowed spell shrinks it), then
-        # buffer == window so there are no scrollbars
+        # buffer == window so there are no scrollbars. Order matters BOTH
+        # ways: the buffer may never be smaller than the window, and the
+        # grid here can be SHRINKING - conhost's own Alt+Enter (which never
+        # reaches the script) fills the screen at whatever font is current,
+        # so a miniature-font console arrives already in fullscreen mode
+        # with a grid far larger than the full-size font fits (measured
+        # 128x33 vs 96x25). Buffer-first threw into the catch below and
+        # left that oversized grid behind: 33 rows of 28px list on a
+        # 25-row screen, the bottom third drawn off the glass (reported
+        # 2026-08-23). Bring the window down to the target first - always
+        # legal, it only ever shrinks under the buffer - then the buffer,
+        # then the window up to meet it.
         try {
             $maxW = [Console]::LargestWindowWidth
             $maxH = [Console]::LargestWindowHeight
+            $fitW = [Math]::Min($maxW, [Console]::WindowWidth)
+            $fitH = [Math]::Min($maxH, [Console]::WindowHeight)
+            $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($fitW, $fitH)
             $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
             $Host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($maxW, $maxH)
         } catch {}
@@ -997,6 +1011,19 @@ function Set-ConsoleWindowed {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null
+        # A maximized frame survives the mode switch (WS_MAXIMIZE stays
+        # set), so the miniature grid below would land inside a
+        # screen-filling window - a small menu adrift in dead space (seen
+        # live 2026-08-23, after a maximize + fullscreen round trip).
+        # Windowed mode means a frame that fits its grid: un-maximize
+        # before sizing. Safe here where Show-MenuWindow's SW_RESTORE
+        # rule isn't - the display mode is already windowed, so there is
+        # no fullscreen state for the restore to drop.
+        try {
+            if ($script:conHwnd -ne [IntPtr]::Zero -and [CLIntFocus.Win]::IsZoomed($script:conHwnd)) {
+                [CLIntFocus.Win]::ShowWindow($script:conHwnd, 9) | Out-Null   # SW_RESTORE
+            }
+        } catch {}
         Set-ConsoleFontSize -Scale $windowedFontScale
         try {
             # Largest* is measured at the shrunken font, so scaling it back
@@ -1052,6 +1079,7 @@ try {
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
