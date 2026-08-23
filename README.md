@@ -64,14 +64,13 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
 
   Per-game gyro aiming, for handhelds whose Motion Assistant provides it.
   Press **Y** on a game and choose **Turn gyro on for this game**; the row
-  then carries a `[GYRO MOUSE]` tag. Gyro switches on as the game starts and
+  then carries a `[GYRO]` tag. Gyro switches on as the game starts and
   off again when it exits, so it is on only for the games you asked for.
 
-  Press **Y** again and a second row lets you choose what the gyro moves:
-  **Switch gyro to stick** aims with a virtual controller's analog stick
-  instead of the mouse pointer, and **Switch gyro to mouse** puts it back.
-  The tag follows — `[GYRO MOUSE]` or `[GYRO STICK]` — and the choice is
-  remembered per game. Mouse suits games with mouse aiming; stick suits
+  Press **Y** again and a second row shows what the gyro moves —
+  **Gyro: mouse** or **Gyro: right analog stick** — and picking it switches
+  to the other. The choice is remembered per game. Mouse suits games with
+  mouse aiming; the analog stick (a virtual controller's) suits
   games that only read a controller. Stick mode is Motion Assistant's own
   virtual-controller mode, so it needs the ViGEmBus driver Motion Assistant
   installs; if it also has HidHide, your physical controller is hidden from

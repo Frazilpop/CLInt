@@ -701,10 +701,19 @@ function Get-GameGyro($game) {
     return $null
 }
 
-# 'Mouse' / 'Xbox' are MA's words; these are the ones the user sees.
-function Get-GyroModeLabel([string]$mode) {
-    if ($mode -eq $script:GYRO_STICK) { return 'stick' }
-    return 'mouse'
+# 'Mouse' / 'Xbox' are MA's words; these are the ones the user sees. Which
+# stick the Xbox mode moves is MA's own XboxType in the profile it will apply
+# for this game - read here, never written, so the label follows a choice made
+# in MA rather than guessing at it. Absent or unreadable means right: that is
+# MA's default and what every profile ships with.
+function Get-GyroModeLabel([string]$mode, $game) {
+    if ($mode -ne $script:GYRO_STICK) { return 'mouse' }
+    $side = 'right'
+    if ($game) {
+        $p = Get-MaGyroProfile $game
+        if ($p -and (Test-Path $p) -and (Read-MaIni $p 'XboxType') -eq 'LEFT') { $side = 'left' }
+    }
+    return "$side analog stick"
 }
 
 # MA's profiles are INIs whose keys sit in a single *unnamed* section (the
@@ -2763,7 +2772,7 @@ function Draw-GameLine([int]$i) {
         # a game can carry both.
         if ($script:gyroEnabled) {
             $gm = Get-GameGyro $items[$i]
-            if ($gm) { $label += "  [GYRO " + (Get-GyroModeLabel $gm).ToUpper() + "]" }
+            if ($gm) { $label += '  [GYRO]' }
         }
         # Steam's own lifetime playtime, and only for real Steam games -
         # a non-Steam shortcut has none on record, so it gets no tag rather
@@ -3968,15 +3977,14 @@ function Show-GameMenu($g) {
     # to turn the gyro on for.
     # The mode row only exists once gyro is on for this game - on its own it
     # would set nothing running, and a row that does nothing is worse than a
-    # row that is not there. Two modes, so it switches rather than opening a
-    # list: it names the one it will move to, which says what the current
-    # one is without a second line to read.
+    # row that is not there. It states the current mode; picking it switches
+    # to the other one - two modes, so a switch rather than a list.
     if ($script:gyroEnabled -and $g.Track -ne 'Window') {
         $gmode = Get-GameGyro $g
         if ($gmode) {
             $opts += 'Turn gyro off for this game'; $acts += 'gyrooff'
-            if ($gmode -eq $script:GYRO_STICK) { $opts += 'Switch gyro to mouse'; $acts += 'gyromouse' }
-            else                               { $opts += 'Switch gyro to stick'; $acts += 'gyrostick' }
+            $opts += "Gyro: $(Get-GyroModeLabel $gmode $g)"
+            $acts += $(if ($gmode -eq $script:GYRO_STICK) { 'gyromouse' } else { 'gyrostick' })
         } else {
             $opts += 'Turn gyro on for this game'; $acts += 'gyroon'
         }
@@ -4006,7 +4014,7 @@ function Set-GameGyroPref($g, [string]$mode) {
     if ($mode) { $script:gyroMap[$k] = $mode } else { $script:gyroMap.Remove($k) }
     Save-GyroMap
     Draw-All                     # Pick-Option cleared the screen
-    if ($mode) { Show-Notice "Gyro will move the $(Get-GyroModeLabel $mode) while $($g.Name) is running." }
+    if ($mode) { Show-Notice "Gyro will move the $(Get-GyroModeLabel $mode $g) while $($g.Name) is running." }
     else       { Show-Notice "Gyro off for $($g.Name)." }
 }
 
@@ -5154,7 +5162,7 @@ try {
                 if ($gyroMode) {
                     $gyroState = Set-GameGyroOn $g $gyroMode
                     if ($gyroState) {
-                        Write-Host "   Gyro: $(Get-GyroModeLabel $gyroMode) (reverts on exit)" -ForegroundColor $theme.Notice
+                        Write-Host "   Gyro: $(Get-GyroModeLabel $gyroMode $g) (reverts on exit)" -ForegroundColor $theme.Notice
                     }
                 }
                 $steamCold = $cur.Type -eq 'Steam' -and
