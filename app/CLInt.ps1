@@ -3451,9 +3451,11 @@ function Pick-Folder([string]$label, [string]$start) {
 }
 
 # Small modal list of choices; returns the chosen index, or -1 on cancel.
-function Pick-Option([string]$title, [string[]]$options) {
+function Pick-Option([string]$title, [string[]]$options, [int]$initial = 0) {
     $script:inModal = $true
-    $sel = 0
+    # Clamped, not trusted: a caller re-opening after a row it removed can
+    # hand in an index past the end of the shorter list.
+    $sel = [Math]::Max(0, [Math]::Min($initial, $options.Count - 1))
     $script:modalTop = 4; $script:modalOff = 0
     $script:modalRows = $options.Count; $script:modalCount = $options.Count
     $script:modalHover = 0
@@ -3962,60 +3964,67 @@ function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bo
 # inert on that row exactly as it did before there was anything but the
 # uninstall here.
 function Show-GameMenu($g) {
-    $opts = @(); $acts = @()
-    # First when it is there: on a row sitting up in the RECENTLY PLAYED
-    # section, this is the reason the menu was opened. Gated on the window
-    # as well as the entry, so the row appears for precisely the games the
-    # section is showing - offering it on an older entry would look like it
-    # had done nothing.
-    if ($script:recentEnabled -and (Test-RecentGame $g)) {
-        $opts += 'Remove from recently played'; $acts += 'unrecent'
-    }
-    # Specialist enough to live only here - no keybind of its own - and only
-    # where Motion Assistant is around to act on it. Skipped for shortcuts
-    # that merely open something: nothing is played, so there is no session
-    # to turn the gyro on for.
-    # The mode row only exists once gyro is on for this game - on its own it
-    # would set nothing running, and a row that does nothing is worse than a
-    # row that is not there. It states the current mode; picking it switches
-    # to the other one - two modes, so a switch rather than a list.
-    if ($script:gyroEnabled -and $g.Track -ne 'Window') {
-        $gmode = Get-GameGyro $g
-        if ($gmode) {
-            $opts += 'Turn gyro off for this game'; $acts += 'gyrooff'
-            $opts += "Gyro: $(Get-GyroModeLabel $gmode $g)"
-            $acts += $(if ($gmode -eq $script:GYRO_STICK) { 'gyromouse' } else { 'gyrostick' })
-        } else {
-            $opts += 'Turn gyro on for this game'; $acts += 'gyroon'
+    $sel = 0
+    while ($true) {
+        $opts = @(); $acts = @()
+        # First when it is there: on a row sitting up in the RECENTLY PLAYED
+        # section, this is the reason the menu was opened. Gated on the window
+        # as well as the entry, so the row appears for precisely the games the
+        # section is showing - offering it on an older entry would look like it
+        # had done nothing.
+        if ($script:recentEnabled -and (Test-RecentGame $g)) {
+            $opts += 'Remove from recently played'; $acts += 'unrecent'
         }
-    }
-    # Uninstalling is Steam's business: a non-Steam shortcut is just a path
-    # Steam was told about, so there is nothing to remove and nothing to
-    # say about it.
-    if ($g.Steam) { $opts += 'Uninstall this game'; $acts += 'uninstall' }
-    if ($opts.Count -eq 0) { return }
-    $name = "$([string]$g.Name)".ToUpper()
-    $c = Pick-Option $name ($opts + @('Return'))
-    if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
-    switch ($acts[$c]) {
-        'unrecent'  { Remove-RecentGame $g }
-        'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
-        'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
-        'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
-        'gyrooff'   { Set-GameGyroPref $g $null }
-        'uninstall' { Invoke-GameUninstall $g $name }
+        # Specialist enough to live only here - no keybind of its own - and
+        # only where Motion Assistant is around to act on it. Skipped for
+        # shortcuts that merely open something: nothing is played, so there is
+        # no session to turn the gyro on for.
+        # Both rows state what is set and flip it in place: picking one loops
+        # back into the menu with the row reworded rather than dropping to the
+        # list, so on/off and the type can be set in one visit. The type row
+        # only exists while gyro is on - alone it would set nothing running -
+        # and switches between the two types rather than opening a list.
+        if ($script:gyroEnabled -and $g.Track -ne 'Window') {
+            $gmode = Get-GameGyro $g
+            if ($gmode) {
+                $opts += 'Gyro: on'; $acts += 'gyrooff'
+                $opts += "Gyro type: $(Get-GyroModeLabel $gmode $g)"
+                $acts += $(if ($gmode -eq $script:GYRO_STICK) { 'gyromouse' } else { 'gyrostick' })
+            } else {
+                $opts += 'Gyro: off'; $acts += 'gyroon'
+            }
+        }
+        # Uninstalling is Steam's business: a non-Steam shortcut is just a
+        # path Steam was told about, so there is nothing to remove and
+        # nothing to say about it.
+        if ($g.Steam) { $opts += 'Uninstall this game'; $acts += 'uninstall' }
+        if ($opts.Count -eq 0) { return }
+        $name = "$([string]$g.Name)".ToUpper()
+        $c = Pick-Option $name ($opts + @('Return')) $sel
+        if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
+        switch ($acts[$c]) {
+            'unrecent'  { Remove-RecentGame $g; return }
+            'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
+            'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
+            'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
+            'gyrooff'   { Set-GameGyroPref $g $null }
+            'uninstall' { Invoke-GameUninstall $g $name; return }
+        }
+        # A gyro row was picked: come back around with the cursor held on it,
+        # so A on the spot keeps toggling.
+        $sel = $c
     }
 }
 
 # The preference only - MA's own file is not touched until the game is
 # actually launched, so nothing about the machine changes from in here.
+# No redraw or notice either: the caller re-opens the menu, whose rows say
+# the new state, and the list's [GYRO] tag catches up on the Draw-All when
+# the menu closes.
 function Set-GameGyroPref($g, [string]$mode) {
     $k = [string]$g.AppId
     if ($mode) { $script:gyroMap[$k] = $mode } else { $script:gyroMap.Remove($k) }
     Save-GyroMap
-    Draw-All                     # Pick-Option cleared the screen
-    if ($mode) { Show-Notice "Gyro will move the $(Get-GyroModeLabel $mode $g) while $($g.Name) is running." }
-    else       { Show-Notice "Gyro off for $($g.Name)." }
 }
 
 # Out of the section and back into the A-Z list below it - with the cursor
