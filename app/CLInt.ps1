@@ -230,7 +230,7 @@ function Get-AppManifestPath([string]$appid) {
 
 function Get-InstalledGames {
     $games = foreach ($lib in (Get-SteamLibraryPaths)) {
-        foreach ($m in (Get-ChildItem (Join-Path $lib 'steamapps\appmanifest_*.acf') -ErrorAction SilentlyContinue)) {
+        foreach ($m in (Get-ChildItem -LiteralPath (Join-Path $lib 'steamapps') -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue)) {
             $c = Get-Content $m.FullName -Raw
             $name  = [regex]::Match($c, '"name"\s+"([^"]+)"').Groups[1].Value
             $appid = [regex]::Match($c, '"appid"\s+"(\d+)"').Groups[1].Value
@@ -327,7 +327,7 @@ function Get-SteamCollections {
     $cols = @{}
     try {
         $dir = Get-SteamUserDir   # live account only - stale ones list collections that no longer exist
-        foreach ($f in (Get-ChildItem (Join-Path $dir 'config\cloudstorage\cloud-storage-namespace-*.json') -ErrorAction SilentlyContinue)) {
+        foreach ($f in (Get-ChildItem -LiteralPath (Join-Path $dir 'config\cloudstorage') -Filter 'cloud-storage-namespace-*.json' -ErrorAction SilentlyContinue)) {
             try {
                 foreach ($e in (Get-Content $f.FullName -Raw | ConvertFrom-Json)) {
                     $key = if ($e -is [array]) { [string]$e[0] } else { [string]$e.key }
@@ -523,7 +523,7 @@ function Test-TrackableExe([string]$path) {
 
 function Get-ShortcutGames([string]$dir) {
     $wsh = New-Object -ComObject WScript.Shell
-    @(Get-ChildItem (Join-Path $dir '*.lnk') -ErrorAction SilentlyContinue |
+    @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -ErrorAction SilentlyContinue |
         Sort-Object BaseName | ForEach-Object {
             $target = $wsh.CreateShortcut($_.FullName).TargetPath
             [pscustomobject]@{
@@ -630,8 +630,8 @@ function Add-MaProfileTags($list) {
             if ($g.Exe) {
                 $base = [System.IO.Path]::GetFileNameWithoutExtension($g.Exe)
                 if ($maProfileNames -contains $base) { $match = $base }
-            } elseif ($g.Dir -and (Test-Path $g.Dir)) {
-                $match = (Get-ChildItem $g.Dir -Filter '*.exe' -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+            } elseif ($g.Dir -and (Test-Path -LiteralPath $g.Dir)) {
+                $match = (Get-ChildItem -LiteralPath $g.Dir -Filter '*.exe' -Recurse -Depth 2 -ErrorAction SilentlyContinue |
                     Where-Object { $maProfileNames -contains $_.BaseName } |
                     Select-Object -First 1).BaseName
             }
@@ -2402,15 +2402,19 @@ function Get-FileItems($t) {
     }
     # Dot-prefixed names (.git, ._macos-droppings, ...) are hidden by
     # convention even when Windows doesn't flag them hidden - skip them.
-    $list += @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+    # -LiteralPath throughout: release folders are full of [1080p][x265]
+    # brackets, which -Path reads as wildcard patterns - and the recursive
+    # probe THROWS on them right through -ErrorAction SilentlyContinue,
+    # which used to kill the whole menu at startup.
+    $list += @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
         Where-Object { -not $_.Name.StartsWith('.') } |
-        Where-Object { @(Get-ChildItem $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
     $resumeEntries = if ($script:videoHistEnabled -or $script:watchingEnabled) { @(Get-ResumeEntries) } else { @() }
     $vlcResume = @{}
     foreach ($e in $resumeEntries) { $vlcResume[$e.Path.ToLower()] = $e.Seconds }
-    $list += @(Get-ChildItem $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
+    $list += @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
         Where-Object { -not $_.Name.StartsWith('.') } |
         ForEach-Object {
             $k = $_.FullName.ToLower()
@@ -3375,7 +3379,8 @@ function Get-PickerEntries($dir) {
         $list += [pscustomobject]@{ Name = '..'; Path = $null; Type = 'Up' }
         # Get-ChildItem already skips attribute-hidden folders; also skip
         # dot-prefixed ones (.git, .vscode, ...), hidden by convention.
-        $list += @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+        # -LiteralPath: bracketed folder names are wildcards to -Path.
+        $list += @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
             Where-Object { -not $_.Name.StartsWith('.') } |
             ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
     }
@@ -3388,7 +3393,7 @@ function Get-PickerEntries($dir) {
 function Pick-Folder([string]$label, [string]$start) {
     $script:inModal = $true
     $dir = $start
-    if (-not $dir -or -not (Test-Path $dir -ErrorAction SilentlyContinue)) { $dir = $env:USERPROFILE }
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) { $dir = $env:USERPROFILE }
     $sel = 0; $off = 0
     $entries = @()
     $needList = $true
