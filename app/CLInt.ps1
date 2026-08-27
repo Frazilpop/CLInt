@@ -567,6 +567,23 @@ function Get-GameTdp($game) {
     if ($w) { return [int]$w } else { return 0 }
 }
 
+# One step round the cycle, saved. Shared by RB and the Y menu's TDP row so
+# the two can never disagree about the order or about what 0 means; returns
+# the new wattage so the caller can say what it landed on.
+function Step-GameTdp($game) {
+    $next = $tdpModes[($tdpModes.IndexOf((Get-GameTdp $game)) + 1) % $tdpModes.Count]
+    if ($next -eq 0) { $script:tdpMap.Remove([string]$game.AppId) }
+    else             { $script:tdpMap[[string]$game.AppId] = $next }
+    Save-TdpMap
+    return $next
+}
+
+# 0 means CLInt sets nothing, which is the machine's own limit - so it reads
+# as the default rather than as a wattage.
+function Get-TdpLabel([int]$watts) {
+    if ($watts) { return "$($watts)W" } else { return 'default' }
+}
+
 function Get-CurrentTdp {
     $info = (& $ryzenAdj --info 2>$null) -join "`n"
     $m = @{}
@@ -3975,6 +3992,16 @@ function Show-GameMenu($g) {
         if ($script:recentEnabled -and (Test-RecentGame $g)) {
             $opts += 'Remove from recently played'; $acts += 'unrecent'
         }
+        # The same cycle RB runs, spelled out: RB is the quick way and stays
+        # the quick way, but it gives no clue that it exists or what the next
+        # step is, so the wattage is a row here too. Same order, same store -
+        # both go through Step-GameTdp. Left out when Motion Assistant has its
+        # own profile for the game, since then the cycle sets nothing (RB says
+        # so in a notice; a row that has to explain why it does nothing is
+        # worse than no row).
+        if ($script:tdpEnabled -and -not $g.MaProfile) {
+            $opts += "TDP: $(Get-TdpLabel (Get-GameTdp $g))"; $acts += 'tdp'
+        }
         # Specialist enough to live only here - no keybind of its own - and
         # only where Motion Assistant is around to act on it. Skipped for
         # shortcuts that merely open something: nothing is played, so there is
@@ -4004,14 +4031,15 @@ function Show-GameMenu($g) {
         if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
         switch ($acts[$c]) {
             'unrecent'  { Remove-RecentGame $g; return }
+            'tdp'       { Step-GameTdp $g | Out-Null }
             'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
             'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
             'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
             'gyrooff'   { Set-GameGyroPref $g $null }
             'uninstall' { Invoke-GameUninstall $g $name; return }
         }
-        # A gyro row was picked: come back around with the cursor held on it,
-        # so A on the spot keeps toggling.
+        # A TDP or gyro row was picked: come back around with the cursor held
+        # on it, so A on the spot keeps cycling.
         $sel = $c
     }
 }
@@ -5255,10 +5283,7 @@ try {
                         Show-Notice "TDP locked: Motion Assistant has its own profile for this game ($($g.MaProfile).ini)"
                     } else {
                         Clear-Notice
-                        $next = $tdpModes[($tdpModes.IndexOf((Get-GameTdp $g)) + 1) % $tdpModes.Count]
-                        if ($next -eq 0) { $tdpMap.Remove([string]$g.AppId) }
-                        else             { $tdpMap[[string]$g.AppId] = $next }
-                        Save-TdpMap
+                        Step-GameTdp $g | Out-Null
                         Draw-GameLine $selected
                         Draw-ScrollHints   # in case the selected line is an indicator row
                     }

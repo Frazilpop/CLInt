@@ -56,7 +56,13 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   driver is already loaded), re-asserted just after the game starts
   (Motion Assistant's own auto-TDP would otherwise override it moments
   in) and restored when the game exits. Stored in
-  `data\tdp-settings.json`. 
+  `data\tdp-settings.json`.
+
+  The same cycle also has a row in the **Y** menu — **TDP: default / 12W /
+  15W / 18W / 5W** — which says where the game currently sits and steps on
+  each time you press A, so you can see the setting rather than remember it.
+  RB stays the quick way round. Games Motion Assistant has its own profile
+  for keep their `[MA profile]` tag and are left to it. 
   
   This feature is auto-detected and hidden if Motion Assistant is not installed.
 
@@ -183,8 +189,9 @@ that last one: tabs then switch as soon as the pointer rests on them.
 **Y**, **M** on the keyboard, or **right-click** opens a short menu for
 whatever is highlighted.
 
-A game in RECENTLY PLAYED can be removed from that section, and Steam games
-can be uninstalled from here, without leaving CLInt. Videos get
+A game in RECENTLY PLAYED can be removed from that section, its TDP and gyro
+set (on machines with Motion Assistant), and Steam games can be uninstalled
+from here, without leaving CLInt. Videos get
 their play count changed — up, down, or back to zero — and a part-watched
 one can be marked as completed (a play is recorded and the resume position
 cleared, so the next episode queues under UP NEXT) or just have its resume
