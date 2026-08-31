@@ -83,14 +83,22 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   installs; if it also has HidHide, your physical controller is hidden from
   the game while the virtual one stands in for it.
 
+  A **Gyro when** row underneath that says when the gyro is live: **always
+  on**, or only while the **left**, **right** or **either** trigger is held.
+  Picking the row steps through those four, and holding a trigger to aim is
+  usually far easier to control than a gyro that never stops. This is Motion
+  Assistant's own trigger setting, so it needs a controller selected in
+  Motion Assistant (a handheld's built-in pad counts) — with none selected,
+  it has no trigger to watch and the gyro stays still.
+
   It works by flipping Motion Assistant's own `AutoSimulate` switch (and,
-  for the mode, its `simulateType` key) in the profile it is going to apply
-  for that game — its per-game profile if it has one, otherwise whichever
-  general profile is currently selected — and putting the previous values
-  back afterwards. Nothing else in that profile is touched, so fan curves,
-  TDP and GPU settings are left exactly as you had them, and Motion
-  Assistant is never restarted. Your choices per game live in
-  `data\gyro-settings.json`.
+  for the mode and the trigger, its `simulateType`, `customButton5` and
+  `customButton6` keys) in the profile it is going to apply for that game —
+  its per-game profile if it has one, otherwise whichever general profile is
+  currently selected — and putting the previous values back afterwards.
+  Nothing else in that profile is touched, so fan curves, TDP and GPU
+  settings are left exactly as you had them, and Motion Assistant is never
+  restarted. Your choices per game live in `data\gyro-settings.json`.
 
   Switching gyro back off works the same way round: when you return to the
   menu, Motion Assistant applies the profile for CLInt itself, so CLInt
@@ -99,7 +107,8 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   after a game closes.
 
   If gyro is already switched on in Motion Assistant, CLInt leaves it
-  alone — mode included — rather than switching it off after a game.
+  alone — mode and trigger included — rather than switching it off after a
+  game.
 
   This feature is auto-detected and hidden if Motion Assistant is not installed.
 
