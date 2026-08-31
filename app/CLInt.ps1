@@ -965,6 +965,15 @@ function Set-GameGyroOn($game, [string]$mode, [string]$trigger) {
 # back when the last game stops asking for a trigger, so a trigger the user
 # set for themselves is borrowed rather than taken.
 $gyroArmerFile = Join-Path $script:dataDir 'gyro-armer.txt'
+# The MA session (by process start time) known to have read an armed profile
+# at its own startup - see Test-GyroArmed for why that is worth remembering.
+$gyroArmedStamp = Join-Path $script:dataDir 'gyro-armed.txt'
+# The scheduled task that restarts Motion Assistant on CLInt's behalf. MA
+# runs elevated, so an unelevated CLInt cannot stop it directly; a task
+# registered once (with a UAC prompt) at highest run level can, and firing
+# an existing task needs no elevation at all - the same mechanism MA's own
+# autostart task uses. app\MaRestartTask.ps1 is the registration step.
+$maRestartTask = 'CLIntMARestart'
 
 function Get-GyroArmerWants {
     $lt = $false
@@ -1039,13 +1048,84 @@ function Assert-GyroArmer {
 # MA reads that profile once, when it starts, so a trigger armed after that
 # is not being watched yet however right the file looks. Anything unknowable
 # counts as armed: a wrong warning about a working setup is worse than none.
+#
+# The polling this arms is a session-wide latch in MA, not a live view of the
+# profile: once its startup read has seen any trigger slot, MA polls the pad
+# until it exits, whatever the profile says afterwards. So a session seen to
+# be armed is stamped (by MA's process start time) and stays armed for its
+# lifetime - a trigger cycled off and back on mid-session recreates the armer
+# record with a fresh timestamp, and without the stamp that would read as a
+# session needing another restart it does not need.
 function Test-GyroArmed {
     try {
         if (-not (Test-Path $script:gyroArmerFile)) { return $true }
         $ma = @(Get-Process MotionAssistant -ErrorAction SilentlyContinue)[0]
         if (-not $ma) { return $true }
-        return ((Get-Item $script:gyroArmerFile).LastWriteTime -lt $ma.StartTime)
+        $start = $ma.StartTime
+        if ((Get-Item $script:gyroArmerFile).LastWriteTime -lt $start) {
+            try { Set-Content $script:gyroArmedStamp "$($start.Ticks)" -Encoding utf8 } catch {}
+            return $true
+        }
+        $seen = ''
+        try { $seen = [string](Get-Content $script:gyroArmedStamp -ErrorAction SilentlyContinue | Select-Object -First 1) } catch {}
+        return ($seen -eq "$($start.Ticks)")
     } catch { return $true }
+}
+
+function Test-MaRestartTask {
+    try { return [bool](Get-ScheduledTask -TaskName $script:maRestartTask -ErrorAction SilentlyContinue) }
+    catch { return $false }
+}
+
+# The one-time elevated step behind automatic MA restarts: register the
+# CLIntMARestart task via a UAC prompt (see app\MaRestartTask.ps1). Asked
+# in CLInt's own words first, so the Windows prompt does not arrive out of
+# nowhere; declining either is remembered by the caller, not here.
+function Register-MaRestartTask {
+    $c = Pick-Option 'LET CLInt RESTART MOTION ASSISTANT?' @(
+        'Yes - Windows will ask for permission once',
+        'Not now')
+    Draw-All
+    if ($c -ne 0) { return $false }
+    Show-Notice 'Waiting for the Windows permission prompt...'
+    try {
+        Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList `
+            "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'MaRestartTask.ps1')`""
+    } catch {}   # declining the UAC prompt throws; the re-test below is the answer
+    return (Test-MaRestartTask)
+}
+
+# A trigger reached MA's startup profile after MA had already started, so
+# this session is not watching it (Test-GyroArmed said so - callers check).
+# Rather than telling the user to restart Motion Assistant, do it: fire the
+# helper task and wait for the swap. With -OfferSetup (the Y-menu path, where
+# the user has just picked a trigger) a missing helper task is offered for
+# one-time registration; without it (startup) a missing task means silence -
+# an unprompted UAC dialog is not a way to say hello.
+function Invoke-MaRearm([switch]$OfferSetup) {
+    $ma = @(Get-Process MotionAssistant -ErrorAction SilentlyContinue)[0]
+    if (-not $ma) { return }   # its next start reads the armed profile anyway
+    $oldStart = $ma.StartTime
+    if (-not (Test-MaRestartTask)) {
+        if (-not $OfferSetup -or $script:maRearmDeclined) { return }
+        if (-not (Register-MaRestartTask)) {
+            $script:maRearmDeclined = $true   # once per session, not per visit
+            Show-Notice 'Motion Assistant must restart (or reboot) before the gyro button works.'
+            return
+        }
+    }
+    Show-Notice 'Restarting Motion Assistant so the gyro button reaches it...'
+    $ok = $false
+    try {
+        Start-ScheduledTask -TaskName $script:maRestartTask -ErrorAction Stop
+        for ($n = 0; $n -lt 80; $n++) {   # 20s cap; a healthy swap takes a few
+            Start-Sleep -Milliseconds 250
+            $now = @(Get-Process MotionAssistant -ErrorAction SilentlyContinue)[0]
+            if ($now -and $now.StartTime -gt $oldStart) { $ok = $true; break }
+        }
+    } catch {}
+    if ($ok) { Show-Notice 'Motion Assistant restarted - the gyro button is set.' }
+    else     { Show-Notice 'Motion Assistant must restart (or reboot) before the gyro button works.' }
 }
 
 function Restore-GameGyro($state) {
@@ -4203,7 +4283,7 @@ function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bo
 # uninstall here.
 function Show-GameMenu($g) {
     $sel = 0
-    $saidTrigger = $false   # a trigger was picked in here, and MA hasn't read it
+    $saidTrigger = $false   # a gyro trigger was picked during this visit
     while ($true) {
         $opts = @(); $acts = @()
         # First when it is there: on a row sitting up in the RECENTLY PLAYED
@@ -4255,12 +4335,17 @@ function Show-GameMenu($g) {
         $c = Pick-Option $name ($opts + @('Return')) $sel
         if ($c -lt 0 -or $c -ge $acts.Count) {   # B, or Return
             Draw-All
-            # Said on the way out, where there is a screen to say it on: a
+            # Settled on the way out, where there is a screen to do it on: a
             # trigger Motion Assistant has not read yet is not merely
-            # inactive, it stops the gyro outright, and finding that out in
-            # the game is exactly what this row is meant to save.
-            if ($saidTrigger) {
-                Show-Notice 'Motion Assistant must restart (or reboot) before the gyro button works.'
+            # inactive, it stops the gyro outright - so rather than sending
+            # the user off to restart Motion Assistant, restart it for them
+            # (Invoke-MaRearm; the one-time task registration is offered here
+            # because a trigger was just picked, so the prompt has a reason).
+            # Armed is re-tested now rather than kept from the pick: a
+            # trigger cycled back off needs nothing, however it looked
+            # mid-visit.
+            if ($saidTrigger -and -not (Test-GyroArmed)) {
+                Invoke-MaRearm -OfferSetup
             }
             return
         }
@@ -4270,10 +4355,7 @@ function Show-GameMenu($g) {
             'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
             'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
             'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
-            'gyrowhen'  {
-                $t = Step-GameGyroTrigger $g
-                $saidTrigger = ($t -ne $script:GYRO_TRIG_NONE) -and -not (Test-GyroArmed)
-            }
+            'gyrowhen'  { $saidTrigger = ((Step-GameGyroTrigger $g) -ne $script:GYRO_TRIG_NONE) }
             'gyrooff'   { Set-GameGyroPref $g $null }
             'uninstall' { Invoke-GameUninstall $g $name; return }
         }
@@ -4909,6 +4991,13 @@ try {
         Invoke-FirstRunSetup
         Draw-All
     }
+    # A gyro trigger got into MA's startup profile after MA had started (set
+    # during a previous CLInt run, typically) - if the helper task is already
+    # registered, quietly restart MA now, while nothing is being played, so
+    # the first launch of the session is not the place it gets found out.
+    # Without the task this stays silent; the Y-menu is where setup is
+    # offered, because there the user has just asked for a trigger.
+    if ($script:gyroEnabled -and -not (Test-GyroArmed)) { Invoke-MaRearm }
     while ($true) {
         $key = Read-InputKey
         $cur = $tabs[$tab]

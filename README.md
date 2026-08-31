@@ -91,13 +91,19 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
 
   This is Motion Assistant's own trigger setting, with one thing to know
   about it: **Motion Assistant only starts watching the triggers when it
-  itself starts up**, reading them from its current general profile. So the
-  first time you choose a trigger, CLInt puts it in that profile for Motion
-  Assistant to find, and it takes effect the next time Motion Assistant runs
-  — restart it, or reboot. The launch screen says so when that is still
-  pending. After that, per-game choices work immediately. If no game uses a
-  trigger any more, the profile gets its original setting back; so does
-  uninstalling CLInt, and a trigger you set in Motion Assistant yourself is
+  itself starts up**, reading them from its current general profile. CLInt
+  handles that for you: it puts the trigger in that profile, and when Motion
+  Assistant is already running (so it read the profile too early to see it),
+  CLInt restarts Motion Assistant on the spot — a couple of seconds, done
+  before you launch anything. Because Motion Assistant runs as administrator,
+  the very first time this happens CLInt asks to set up a small Windows
+  scheduled task (`CLIntMARestart`) and Windows shows one permission prompt;
+  say yes once and every restart after that is automatic and silent. Decline
+  it and the old way still stands: the trigger takes effect the next time
+  Motion Assistant is started, and the launch screen says so while that is
+  still pending. If no game uses a trigger any more, the profile gets its
+  original setting back; so does uninstalling CLInt (which also removes the
+  scheduled task), and a trigger you set in Motion Assistant yourself is
   left exactly as it is. It also needs a controller selected in Motion
   Assistant (a handheld's built-in pad counts) — with none selected it has no
   trigger to watch and the gyro stays still.
@@ -108,8 +114,10 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   its per-game profile if it has one, otherwise whichever general profile is
   currently selected — and putting the previous values back afterwards.
   Nothing else in that profile is touched, so fan curves, TDP and GPU
-  settings are left exactly as you had them, and Motion Assistant is never
-  restarted. Your choices per game live in `data\gyro-settings.json`.
+  settings are left exactly as you had them. Motion Assistant is only ever
+  restarted for the trigger case above — never for switching gyro on or off
+  or changing its type. Your choices per game live in
+  `data\gyro-settings.json`.
 
   Switching gyro back off works the same way round: when you return to the
   menu, Motion Assistant applies the profile for CLInt itself, so CLInt

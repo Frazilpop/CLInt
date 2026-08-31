@@ -126,6 +126,26 @@ public static extern bool WritePrivateProfileString(string section, string key, 
     } catch {}
 }
 
+# The CLIntMARestart scheduled task (registered so CLInt can restart Motion
+# Assistant when a newly chosen gyro button needs it). It was registered
+# elevated, so removing it may need the same - try quietly first, then once
+# via a UAC prompt, and say how to finish the job by hand if both refuse.
+if (Get-ScheduledTask -TaskName 'CLIntMARestart' -ErrorAction SilentlyContinue) {
+    try { Unregister-ScheduledTask -TaskName 'CLIntMARestart' -Confirm:$false -ErrorAction Stop } catch {
+        try {
+            Start-Process powershell -Verb RunAs -Wait -ArgumentList `
+                "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $here 'MaRestartTask.ps1')`" -Remove"
+        } catch {}
+    }
+    if (Get-ScheduledTask -TaskName 'CLIntMARestart' -ErrorAction SilentlyContinue) {
+        Write-Host "  The CLIntMARestart scheduled task is still registered - remove it" -ForegroundColor Yellow
+        Write-Host "  from an elevated prompt with:" -ForegroundColor Yellow
+        Write-Host "      schtasks /delete /tn CLIntMARestart /f" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Removed: Motion Assistant restart task" -ForegroundColor Green
+    }
+}
+
 # --- 4. Personal data (optional) ---------------------------------------
 # Settings, histories, per-game TDP, the hotkey binding, error log - the
 # data\ folder, plus root leftovers from the pre-v0.2.10 flat layout.
