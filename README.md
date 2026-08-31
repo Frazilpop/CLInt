@@ -80,14 +80,30 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   mouse aiming; the analog stick (a virtual controller's) suits
   games that only read a controller. Stick mode is Motion Assistant's own
   virtual-controller mode, so it needs the ViGEmBus driver Motion Assistant
-  installs; if it also has HidHide, your physical controller is hidden from
-  the game while the virtual one stands in for it.
+  installs; with HidHide and Auto Cloak set up too (see the gyro button
+  section below), your physical controller is hidden from the game while
+  the virtual one stands in for it.
 
   A **Gyro button** row underneath that says what the gyro waits for:
   **always on**, or only while the **left**, **right** or **either** trigger
   is held down. Picking the row steps through those four, and holding a
   trigger to aim is usually far easier to control than a gyro that never
   stops.
+
+  One pairing has an extra requirement: the gyro button combined with
+  **stick mode**. Stick mode connects a second, virtual controller, and with
+  two identical controllers visible Motion Assistant watches the wrong one
+  for the trigger — the gyro simply stays still. Motion Assistant solves
+  this itself by hiding your physical controller while the gyro runs, but
+  that needs its **HidHide** driver installed (the installer is in Motion
+  Assistant's own `drivers` folder, next to ViGEmBus; restart Windows after
+  installing) and its **Auto Cloak** checkbox ticked (on Motion Assistant's
+  gyro tab, in the physical-controller settings group — ticking it takes
+  effect immediately). CLInt checks for both and says so, when you pick the
+  pairing and again on the launch screen, if it would not work; mouse mode
+  and always-on need none of this. A side effect you may notice: games and
+  Steam see one controller instead of two while the gyro is on — that is
+  the fix working.
 
   This is Motion Assistant's own trigger setting, with one thing to know
   about it: **Motion Assistant only starts watching the triggers when it

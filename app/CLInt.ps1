@@ -704,6 +704,12 @@ $MA_RT_VAL  = 'CustomRT'
 $MA_BTN_OFF = 'CustomNone'
 $maGlobalIni     = Join-Path $maDir 'Profiles\Global.ini'
 $gyroEnabled     = Test-Path $maGlobalIni      # no MA, no feature, no rows
+# The two places MA itself looks for HidHide's command-line tool (its old
+# and new installer layouts). Only ever tested for existence - the presence
+# of the CLI is what tells MA, and so CLInt, that the driver is installed.
+$hidHideCliPaths = @(
+    (Join-Path $env:ProgramFiles 'Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe'),
+    (Join-Path $env:ProgramFiles 'Nefarius Software Solutions e.U\HidHideCLI\HidHideCLI.exe'))
 $gyroFile        = Join-Path $script:dataDir 'gyro-settings.json'
 $gyroRestoreFile = Join-Path $script:dataDir 'gyro-restore.txt'
 
@@ -791,6 +797,34 @@ function Get-GyroTriggerLabel([string]$trig) {
         $script:GYRO_TRIG_BOTH  { return 'either trigger' }
         default                 { return 'always on' }
     }
+}
+
+# The gyro button in stick mode has one extra requirement of MA's, found the
+# hard way: stick mode connects a second, virtual Xbox pad, and with two
+# pads visible MA's own trigger reader watches the wrong one - the trigger
+# never reads as pressed and the gyro sits stopped entirely, which looks
+# like the feature being dead rather than a driver being missing. MA fixes
+# this itself, by hiding the real pad from everything but itself while the
+# gyro runs - but only when its HidHide driver is installed AND its own
+# Auto Cloak setting is ticked. Mouse mode never makes a second pad and
+# always-on never reads the trigger, so only the stick+button pairing needs
+# any of this. Returns the one-line warning to show (short enough for
+# Show-Notice's list-width truncation), or $null when the pairing will
+# work - and anything unknowable counts as working, because a wrong warning
+# about a healthy setup is worse than none (the Test-GyroArmed rule).
+# HidHide ships as an MSI in MA's own drivers folder; Auto Cloak is a
+# checkbox on MA's gyro tab whose factory default is on, so only an
+# explicit False in the user's Global.ini means MA will not cloak.
+function Get-GyroStickWarning {
+    try {
+        if (-not @($script:hidHideCliPaths | Where-Object { Test-Path $_ }).Count) {
+            return 'The gyro button in stick mode needs HidHide - the README says how.'
+        }
+        if ((Read-MaIni $script:maGlobalIni 'AutoCloak') -eq 'False') {
+            return 'Tick Auto Cloak in Motion Assistant or the gyro button stays off.'
+        }
+    } catch {}
+    return $null
 }
 
 # MA's profiles are INIs whose keys sit in a single *unnamed* section (the
@@ -4284,6 +4318,7 @@ function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bo
 function Show-GameMenu($g) {
     $sel = 0
     $saidTrigger = $false   # a gyro trigger was picked during this visit
+    $touchedGyro = $false   # any gyro row was picked during this visit
     while ($true) {
         $opts = @(); $acts = @()
         # First when it is there: on a row sitting up in the RECENTLY PLAYED
@@ -4347,6 +4382,16 @@ function Show-GameMenu($g) {
             if ($saidTrigger -and -not (Test-GyroArmed)) {
                 Invoke-MaRearm -OfferSetup
             }
+            # After the rearm on purpose: a restarted MA still cannot pick
+            # one trigger out of two identical pads, so when both warnings
+            # apply this is the one left standing. Judged against the final
+            # state rather than the picks - a pairing cycled back out of
+            # needs nothing said about it.
+            if ($touchedGyro -and (Get-GameGyro $g) -eq $script:GYRO_STICK -and
+                (Get-GameGyroTrigger $g) -ne $script:GYRO_TRIG_NONE) {
+                $warn = Get-GyroStickWarning
+                if ($warn) { Show-Notice $warn }
+            }
             return
         }
         switch ($acts[$c]) {
@@ -4359,6 +4404,7 @@ function Show-GameMenu($g) {
             'gyrooff'   { Set-GameGyroPref $g $null }
             'uninstall' { Invoke-GameUninstall $g $name; return }
         }
+        if ($acts[$c] -like 'gyro*') { $touchedGyro = $true }
         # A TDP or gyro row was picked: come back around with the cursor held
         # on it, so A on the spot keeps cycling.
         $sel = $c
@@ -5558,6 +5604,15 @@ try {
                         if ($gyroTrig -ne $script:GYRO_TRIG_NONE -and -not (Test-GyroArmed)) {
                             Write-Host "   Motion Assistant hasn't restarted since you set that button, so it" -ForegroundColor DarkYellow
                             Write-Host "   isn't watching for it yet - the gyro will stay still until it has." -ForegroundColor DarkYellow
+                        }
+                        # The stick+button pairing needs MA's HidHide+Auto
+                        # Cloak (see Get-GyroStickWarning). The menu said so
+                        # when it was picked; said again here because this
+                        # broken state persists across sessions and this is
+                        # the moment the gyro is about to sit dead.
+                        if ($gyroMode -eq $script:GYRO_STICK -and $gyroTrig -ne $script:GYRO_TRIG_NONE) {
+                            $stickWarn = Get-GyroStickWarning
+                            if ($stickWarn) { Write-Host "   $stickWarn" -ForegroundColor DarkYellow }
                         }
                     }
                 }
