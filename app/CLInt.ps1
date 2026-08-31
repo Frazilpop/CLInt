@@ -847,16 +847,23 @@ function Write-MaTriggerKey([string]$path, [string]$key, [string]$value, [string
     Write-MaIni $path $key $value | Out-Null
 }
 
+# Whichever general profile is current - Global.ini's lastFile names it.
+# This is the fallback for anything without a profile of its own, and it is
+# also the file MA reads at its own startup (see Assert-GyroArmer).
+function Get-MaGeneralProfile {
+    $last = Read-MaIni $script:maGlobalIni 'lastFile'
+    if (-not $last) { $last = 'default' }
+    return (Join-Path $script:maDir "Profiles\General\$last.ini")
+}
+
 # The profile MA will actually apply for this game: its own process profile
 # when it has one (MA prefers those over the general profile), otherwise
-# whichever general profile is current - Global.ini's lastFile names it.
+# whichever general profile is current.
 function Get-MaGyroProfile($game) {
     if ($game.MaProfile) {
         return (Join-Path $script:maDir "Profiles\Process\$($game.MaProfile).ini")
     }
-    $last = Read-MaIni $script:maGlobalIni 'lastFile'
-    if (-not $last) { $last = 'default' }
-    return (Join-Path $script:maDir "Profiles\General\$last.ini")
+    return (Get-MaGeneralProfile)
 }
 
 # The profile MA applies once the menu is back in front, chosen the same way
@@ -870,9 +877,7 @@ function Get-MaMenuProfile {
         $p = Join-Path $script:maDir "Profiles\Process\$own.ini"
         if (Test-Path $p) { return $p }
     }
-    $last = Read-MaIni $script:maGlobalIni 'lastFile'
-    if (-not $last) { $last = 'default' }
-    return (Join-Path $script:maDir "Profiles\General\$last.ini")
+    return (Get-MaGeneralProfile)
 }
 
 # This is the actual off switch: the profile above is the one MA re-reads on
@@ -940,6 +945,109 @@ function Set-GameGyroOn($game, [string]$mode, [string]$trigger) {
                               PrevLT = $prevLT; PrevRT = $prevRT }
 }
 
+# Writing a trigger into the profile MA is about to apply is NOT enough on
+# its own, and that is MA's design rather than a mistake here: applying a
+# profile loads the trigger into MA's settings, but the thing that decides
+# whether MA polls the pad at all - hasGamepadCustomButtons - is recomputed in
+# exactly two places, its own startup (Form1_Load, which reads the general
+# profile and then hands it to hotkeys.updateSettings) and its own UI. A
+# trigger that arrives any other way is therefore configured but never
+# watched: it never reads as pressed, and since a trigger IS set the gyro is
+# held off completely - the gyro appears dead rather than trigger-gated.
+#
+# So the trigger has to be in the file MA reads at startup, BEFORE it starts.
+# CLInt keeps that file - the current general profile - carrying exactly the
+# trigger slots its own per-game settings need: one game on the left trigger
+# arms the left slot, and once armed, the per-game values (which a profile
+# apply DOES load) decide what actually gates. Nothing needs a trigger, so
+# nothing is written, and a machine that never uses the feature never has its
+# MA config touched. The values found there first are kept in data\ and put
+# back when the last game stops asking for a trigger, so a trigger the user
+# set for themselves is borrowed rather than taken.
+$gyroArmerFile = Join-Path $script:dataDir 'gyro-armer.txt'
+
+function Get-GyroArmerWants {
+    $lt = $false
+    $rt = $false
+    foreach ($e in $script:gyroMap.Values) {
+        switch ($e.Trigger) {
+            $script:GYRO_TRIG_LEFT  { $lt = $true }
+            $script:GYRO_TRIG_RIGHT { $rt = $true }
+            $script:GYRO_TRIG_BOTH  { $lt = $true; $rt = $true }
+        }
+    }
+    return @{ LT = $lt; RT = $rt }
+}
+
+function Read-GyroArmerRecord {
+    if (-not (Test-Path $script:gyroArmerFile)) { return $null }
+    try {
+        # path <TAB> customButton5 <TAB> customButton6, as they were found.
+        # First line, not a trimmed file: an empty trailing field means the
+        # key was absent and putting it back means deleting it.
+        $bits = (((Get-Content $script:gyroArmerFile -Raw) -split "`r?`n")[0] -split "`t")
+        if ($bits.Count -ge 3 -and $bits[0]) {
+            return [pscustomobject]@{ Path = $bits[0]; LT = $bits[1].Trim(); RT = $bits[2].Trim() }
+        }
+    } catch {}
+    return $null
+}
+
+function Clear-GyroArmer($rec) {
+    if ($rec -and (Test-Path $rec.Path)) {
+        Restore-MaKey $rec.Path $script:MA_LT_KEY $rec.LT
+        Restore-MaKey $rec.Path $script:MA_RT_KEY $rec.RT
+    }
+    try { Remove-Item $script:gyroArmerFile -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+function Assert-GyroArmer {
+    if (-not $script:gyroEnabled) { return }
+    $path = Get-MaGeneralProfile
+    $rec  = Read-GyroArmerRecord
+    # The user switched general profile since: give the old one its values
+    # back before borrowing slots in the new one.
+    if ($rec -and $rec.Path -ne $path) { Clear-GyroArmer $rec; $rec = $null }
+    $want = Get-GyroArmerWants
+    if (-not ($want.LT -or $want.RT)) {
+        if ($rec) { Clear-GyroArmer $rec }
+        return
+    }
+    if (-not (Test-Path $path)) { return }
+    $curLT = Read-MaIni $path $script:MA_LT_KEY
+    $curRT = Read-MaIni $path $script:MA_RT_KEY
+    if (-not $rec) {
+        # A trigger of the user's own already arms MA here, and it is not
+        # CLInt's to move: leave the profile alone entirely rather than
+        # borrow a slot that is doing the job already.
+        if ($curLT -eq $script:MA_LT_VAL -or $curRT -eq $script:MA_RT_VAL) { return }
+        # Whatever is there before the first slot is borrowed is the user's.
+        # Written once and then left alone: the record's own timestamp is what
+        # says whether MA has started since (see Test-GyroArmed), so rewriting
+        # it each time would make an armed profile look permanently unread.
+        try { "$path`t$curLT`t$curRT" | Set-Content $script:gyroArmerFile -Encoding utf8 } catch {}
+    }
+    # Additive: a slot is set when something wants it and put back to what was
+    # found when nothing does. A slot CLInt never borrowed is never written,
+    # so an unrelated setting in this profile cannot be clobbered by arming.
+    if ($want.LT) { if ($curLT -ne $script:MA_LT_VAL) { Write-MaIni $path $script:MA_LT_KEY $script:MA_LT_VAL | Out-Null } }
+    elseif ($rec -and $curLT -eq $script:MA_LT_VAL) { Restore-MaKey $path $script:MA_LT_KEY $rec.LT }
+    if ($want.RT) { if ($curRT -ne $script:MA_RT_VAL) { Write-MaIni $path $script:MA_RT_KEY $script:MA_RT_VAL | Out-Null } }
+    elseif ($rec -and $curRT -eq $script:MA_RT_VAL) { Restore-MaKey $path $script:MA_RT_KEY $rec.RT }
+}
+
+# MA reads that profile once, when it starts, so a trigger armed after that
+# is not being watched yet however right the file looks. Anything unknowable
+# counts as armed: a wrong warning about a working setup is worse than none.
+function Test-GyroArmed {
+    try {
+        if (-not (Test-Path $script:gyroArmerFile)) { return $true }
+        $ma = @(Get-Process MotionAssistant -ErrorAction SilentlyContinue)[0]
+        if (-not $ma) { return $true }
+        return ((Get-Item $script:gyroArmerFile).LastWriteTime -lt $ma.StartTime)
+    } catch { return $true }
+}
+
 function Restore-GameGyro($state) {
     if (-not $state) { return }
     $v = $state.Prev
@@ -989,7 +1097,9 @@ function Repair-GyroState {
     } catch {}
     try { Remove-Item $script:gyroRestoreFile -Force -ErrorAction SilentlyContinue } catch {}
 }
-if ($gyroEnabled) { Repair-GyroState }
+# Repair first, then arm: a crash record puts the borrowed keys back, and the
+# armer is what the general profile is supposed to rest at once it has.
+if ($gyroEnabled) { Repair-GyroState; Assert-GyroArmer }
 
 if ($List) {
     if ($games.Count -eq 0) { Write-Host "No installed Steam games found."; exit 1 }
@@ -4172,6 +4282,7 @@ function Set-GameGyroPref($g, [string]$mode) {
         $script:gyroMap[$k] = @{ Mode = $mode; Trigger = (Get-GameGyroTrigger $g) }
     } else { $script:gyroMap.Remove($k) }
     Save-GyroMap
+    Assert-GyroArmer   # turning gyro off may have been the last trigger
 }
 
 # Round the four values and back to always-on, the same shape as the TDP
@@ -4184,6 +4295,8 @@ function Step-GameGyroTrigger($g) {
     $next = $script:gyroTrigModes[([array]::IndexOf($script:gyroTrigModes, $cur) + 1) % $script:gyroTrigModes.Count]
     $script:gyroMap[$k].Trigger = $next
     Save-GyroMap
+    # MA has to have this in its startup profile to watch the trigger at all.
+    Assert-GyroArmer
     return $next
 }
 
@@ -5335,6 +5448,13 @@ try {
                         $when = $(if ($gyroTrig -eq $script:GYRO_TRIG_NONE) { '' }
                                   else { ", $(Get-GyroTriggerLabel $gyroTrig)" })
                         Write-Host "   Gyro: $(Get-GyroModeLabel $gyroMode $g)$when (reverts on exit)" -ForegroundColor $theme.Notice
+                        # Said here rather than in the menu because this is the
+                        # moment it matters: MA picks the trigger up when it
+                        # starts, so until it has, the gyro would sit waiting
+                        # for a trigger press it is not watching for.
+                        if ($gyroTrig -ne $script:GYRO_TRIG_NONE -and -not (Test-GyroArmed)) {
+                            Write-Host "   Motion Assistant reads the trigger when it starts - restart it or reboot" -ForegroundColor $theme.Hint
+                        }
                     }
                 }
                 $steamCold = $cur.Type -eq 'Steam' -and

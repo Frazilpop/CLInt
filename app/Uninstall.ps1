@@ -99,7 +99,34 @@ if ((Get-ItemProperty $runKey -Name 'CLInt' -ErrorAction SilentlyContinue)) {
     Write-Host "  Removed: launch-at-startup entry" -ForegroundColor Green
 }
 
-# --- 3. Personal data (optional) ---------------------------------------
+# --- 3. Motion Assistant's own config ------------------------------------
+# The per-game gyro trigger needs Motion Assistant to read a trigger from its
+# general profile when it starts, so CLInt borrows a slot there and notes
+# what was in it. That note is the only thing that knows how to undo it, so
+# it is spent here rather than deleted with the rest of data\ - leaving a
+# trigger behind in someone's profile would quietly gate their own gyro
+# forever after CLInt was gone.
+$armer = Join-Path $root 'data\gyro-armer.txt'
+if (Test-Path $armer) {
+    try {
+        Add-Type -Namespace CLIntUnIni -Name Api -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+public static extern bool WritePrivateProfileString(string section, string key, string val, string path);
+'@
+        $bits = (((Get-Content $armer -Raw) -split "`r?`n")[0] -split "`t")
+        if ($bits.Count -ge 3 -and $bits[0] -and (Test-Path $bits[0])) {
+            foreach ($pair in @(@('customButton5', $bits[1].Trim()), @('customButton6', $bits[2].Trim()))) {
+                $v = $pair[1]
+                if (-not $v) { $v = [NullString]::Value }   # was absent: remove the line
+                [CLIntUnIni.Api]::WritePrivateProfileString('', $pair[0], $v, $bits[0]) | Out-Null
+            }
+            Write-Host "  Restored: Motion Assistant's gyro trigger setting" -ForegroundColor Green
+        }
+        Remove-Item $armer -Force -Confirm:$false -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+# --- 4. Personal data (optional) ---------------------------------------
 # Settings, histories, per-game TDP, the hotkey binding, error log - the
 # data\ folder, plus root leftovers from the pre-v0.2.10 flat layout.
 # Kept by default so a reinstall picks up right where you left off.
@@ -116,7 +143,7 @@ if (Read-YesNo 'Also delete your settings and history?' $false) {
     Write-Host "  Kept - a reinstall will pick them straight back up." -ForegroundColor Green
 }
 
-# --- 4. Done ------------------------------------------------------------
+# --- 5. Done ------------------------------------------------------------
 Write-Host ""
 Write-Host "  Uninstalled. You can now delete this folder if you want" -ForegroundColor Magenta
 Write-Host "  CLInt gone completely." -ForegroundColor Magenta

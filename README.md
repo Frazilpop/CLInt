@@ -87,9 +87,20 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   **always on**, or only while the **left**, **right** or **either** trigger
   is held down. Picking the row steps through those four, and holding a
   trigger to aim is usually far easier to control than a gyro that never
-  stops. This is Motion Assistant's own trigger setting, so it needs a
-  controller selected in Motion Assistant (a handheld's built-in pad counts)
-  — with none selected, it has no trigger to watch and the gyro stays still.
+  stops.
+
+  This is Motion Assistant's own trigger setting, with one thing to know
+  about it: **Motion Assistant only starts watching the triggers when it
+  itself starts up**, reading them from its current general profile. So the
+  first time you choose a trigger, CLInt puts it in that profile for Motion
+  Assistant to find, and it takes effect the next time Motion Assistant runs
+  — restart it, or reboot. The launch screen says so when that is still
+  pending. After that, per-game choices work immediately. If no game uses a
+  trigger any more, the profile gets its original setting back; so does
+  uninstalling CLInt, and a trigger you set in Motion Assistant yourself is
+  left exactly as it is. It also needs a controller selected in Motion
+  Assistant (a handheld's built-in pad counts) — with none selected it has no
+  trigger to watch and the gyro stays still.
 
   It works by flipping Motion Assistant's own `AutoSimulate` switch (and,
   for the mode and the trigger, its `simulateType`, `customButton5` and
