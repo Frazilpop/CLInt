@@ -4203,6 +4203,7 @@ function Wait-ForUninstall($manifest, [int]$ms, [bool]$stopOnFocus = $false, [bo
 # uninstall here.
 function Show-GameMenu($g) {
     $sel = 0
+    $saidTrigger = $false   # a trigger was picked in here, and MA hasn't read it
     while ($true) {
         $opts = @(); $acts = @()
         # First when it is there: on a row sitting up in the RECENTLY PLAYED
@@ -4252,14 +4253,27 @@ function Show-GameMenu($g) {
         if ($opts.Count -eq 0) { return }
         $name = "$([string]$g.Name)".ToUpper()
         $c = Pick-Option $name ($opts + @('Return')) $sel
-        if ($c -lt 0 -or $c -ge $acts.Count) { Draw-All; return }   # B, or Return
+        if ($c -lt 0 -or $c -ge $acts.Count) {   # B, or Return
+            Draw-All
+            # Said on the way out, where there is a screen to say it on: a
+            # trigger Motion Assistant has not read yet is not merely
+            # inactive, it stops the gyro outright, and finding that out in
+            # the game is exactly what this row is meant to save.
+            if ($saidTrigger) {
+                Show-Notice 'Motion Assistant must restart (or reboot) before the gyro button works.'
+            }
+            return
+        }
         switch ($acts[$c]) {
             'unrecent'  { Remove-RecentGame $g; return }
             'tdp'       { Step-GameTdp $g | Out-Null }
             'gyroon'    { Set-GameGyroPref $g $script:GYRO_MOUSE }   # mouse is where MA starts
             'gyromouse' { Set-GameGyroPref $g $script:GYRO_MOUSE }
             'gyrostick' { Set-GameGyroPref $g $script:GYRO_STICK }
-            'gyrowhen'  { Step-GameGyroTrigger $g | Out-Null }
+            'gyrowhen'  {
+                $t = Step-GameGyroTrigger $g
+                $saidTrigger = ($t -ne $script:GYRO_TRIG_NONE) -and -not (Test-GyroArmed)
+            }
             'gyrooff'   { Set-GameGyroPref $g $null }
             'uninstall' { Invoke-GameUninstall $g $name; return }
         }
@@ -5453,7 +5467,8 @@ try {
                         # starts, so until it has, the gyro would sit waiting
                         # for a trigger press it is not watching for.
                         if ($gyroTrig -ne $script:GYRO_TRIG_NONE -and -not (Test-GyroArmed)) {
-                            Write-Host "   Motion Assistant reads the trigger when it starts - restart it or reboot" -ForegroundColor $theme.Hint
+                            Write-Host "   Motion Assistant hasn't restarted since you set that button, so it" -ForegroundColor DarkYellow
+                            Write-Host "   isn't watching for it yet - the gyro will stay still until it has." -ForegroundColor DarkYellow
                         }
                     }
                 }
