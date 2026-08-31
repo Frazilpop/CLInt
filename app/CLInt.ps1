@@ -786,9 +786,9 @@ function Get-GyroModeLabel([string]$mode, $game) {
 # either way round.
 function Get-GyroTriggerLabel([string]$trig) {
     switch ($trig) {
-        $script:GYRO_TRIG_LEFT  { return 'left trigger held' }
-        $script:GYRO_TRIG_RIGHT { return 'right trigger held' }
-        $script:GYRO_TRIG_BOTH  { return 'either trigger held' }
+        $script:GYRO_TRIG_LEFT  { return 'left trigger' }
+        $script:GYRO_TRIG_RIGHT { return 'right trigger' }
+        $script:GYRO_TRIG_BOTH  { return 'either trigger' }
         default                 { return 'always on' }
     }
 }
@@ -4129,7 +4129,7 @@ function Show-GameMenu($g) {
                 $opts += 'Gyro: on'; $acts += 'gyrooff'
                 $opts += "Gyro type: $(Get-GyroModeLabel $gmode $g)"
                 $acts += $(if ($gmode -eq $script:GYRO_STICK) { 'gyromouse' } else { 'gyrostick' })
-                $opts += "Gyro when: $(Get-GyroTriggerLabel (Get-GameGyroTrigger $g))"
+                $opts += "Gyro button: $(Get-GyroTriggerLabel (Get-GameGyroTrigger $g))"
                 $acts += 'gyrowhen'
             } else {
                 $opts += 'Gyro: off'; $acts += 'gyroon'
@@ -5333,7 +5333,7 @@ try {
                     $gyroState = Set-GameGyroOn $g $gyroMode $gyroTrig
                     if ($gyroState) {
                         $when = $(if ($gyroTrig -eq $script:GYRO_TRIG_NONE) { '' }
-                                  else { " while $(Get-GyroTriggerLabel $gyroTrig)" })
+                                  else { ", $(Get-GyroTriggerLabel $gyroTrig)" })
                         Write-Host "   Gyro: $(Get-GyroModeLabel $gyroMode $g)$when (reverts on exit)" -ForegroundColor $theme.Notice
                     }
                 }

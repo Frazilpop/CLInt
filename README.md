@@ -83,13 +83,13 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
   installs; if it also has HidHide, your physical controller is hidden from
   the game while the virtual one stands in for it.
 
-  A **Gyro when** row underneath that says when the gyro is live: **always
-  on**, or only while the **left**, **right** or **either** trigger is held.
-  Picking the row steps through those four, and holding a trigger to aim is
-  usually far easier to control than a gyro that never stops. This is Motion
-  Assistant's own trigger setting, so it needs a controller selected in
-  Motion Assistant (a handheld's built-in pad counts) — with none selected,
-  it has no trigger to watch and the gyro stays still.
+  A **Gyro button** row underneath that says what the gyro waits for:
+  **always on**, or only while the **left**, **right** or **either** trigger
+  is held down. Picking the row steps through those four, and holding a
+  trigger to aim is usually far easier to control than a gyro that never
+  stops. This is Motion Assistant's own trigger setting, so it needs a
+  controller selected in Motion Assistant (a handheld's built-in pad counts)
+  — with none selected, it has no trigger to watch and the gyro stays still.
 
   It works by flipping Motion Assistant's own `AutoSimulate` switch (and,
   for the mode and the trigger, its `simulateType`, `customButton5` and
