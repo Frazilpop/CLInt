@@ -3033,6 +3033,14 @@ function Snap-Selection {
     while ($i -gt 0 -and $script:items[$i].Unselectable) { $i-- }
     $script:selected = $i
 }
+# The first row of the section-heading run (title + spacer) sitting directly
+# above item $i - or $i itself when there is none. The cursor can never rest
+# on a heading, so a viewport that only ever chases the cursor would park one
+# row below the RECENTLY PLAYED title and never show it again (v1.4.20).
+function Get-SectionTop([int]$i) {
+    while ($i -gt 0 -and $script:items[$i - 1].Unselectable) { $i-- }
+    return $i
+}
 
 # Pull the viewport back around the selection. Every other caller adjusts
 # $offset itself as it moves the cursor; this is for the case where the
@@ -4989,11 +4997,17 @@ function Move-Selection([int]$delta) {
         $new = ($new + $step + $items.Count) % $items.Count
     }
     $script:selected = $new
-    if ($script:selected -lt $script:offset) {
-        $script:offset = $script:selected
-        Draw-List
-    } elseif ($script:selected -ge $script:offset + $script:visible) {
-        $script:offset = $script:selected - $script:visible + 1
+    $want = $script:offset
+    if ($script:selected -lt $want) { $want = $script:selected }
+    elseif ($script:selected -ge $want + $script:visible) { $want = $script:selected - $script:visible + 1 }
+    # A cursor landing just under a section heading brings the heading with
+    # it (as far as the viewport allows) - otherwise the title above the
+    # first game is unreachable: the cursor can't sit on it, so the offset
+    # would stop one row short of it forever.
+    $top = Get-SectionTop $script:selected
+    if ($top -lt $want) { $want = [Math]::Max($top, $script:selected - $script:visible + 1) }
+    if ($want -ne $script:offset) {
+        $script:offset = $want
         Draw-List
     } else {
         Draw-GameLine $old        # repaint only the two lines that changed
