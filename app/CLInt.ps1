@@ -2343,6 +2343,46 @@ function Set-VideoPlays([string]$path, [int]$n) {
     }
     Save-WatchMap
 }
+# "I've already seen that one" for a single UP NEXT suggestion. Watching a
+# series out of order runs the section out of road: the folder's most
+# recently finished episode can be an early one, so the episode offered
+# after it is one already watched - and nothing about that will ever change
+# on its own, so the same row sits there for good with no way past it.
+#
+# A tombstone rather than a deletion, and dated NOW rather than forever: it
+# quiets the suggestion only while the folder's account of itself is
+# unchanged. Finish anything else in there and the folder's latest-finished
+# stamp moves past the tombstone, the section works its next episode out
+# afresh, and this file is offered again if it genuinely is the one - so a
+# rewatch of the show starts clean without anything being un-dismissed by
+# hand. Keyed by the suggested file, which belongs to exactly one folder,
+# so one show's dismissal can never quiet another's.
+$upNextSkipFile = Join-Path $script:dataDir 'upnext-skip.json'
+$upNextSkip = @{}
+if (Test-Path $upNextSkipFile) {
+    try {
+        (Get-Content $upNextSkipFile -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $upNextSkip[$_.Name] = $_.Value }
+    } catch {}
+}
+function Save-UpNextSkip {
+    try { [pscustomobject]$script:upNextSkip | ConvertTo-Json | Set-Content $script:upNextSkipFile -Encoding utf8 } catch {}
+}
+function Remove-UpNextEntry([string]$path) {
+    $script:upNextSkip[$path.ToLower()] = [pscustomobject]@{
+        Hidden = [DateTime]::Now.ToString('s')
+    }
+    Save-UpNextSkip
+}
+# $when is the folder's latest-finished stamp - the thing that decided this
+# suggestion in the first place. An unreadable tombstone counts as absent:
+# a suggestion shown once too often is a far smaller fault than one that
+# can never come back.
+function Test-UpNextSkipped([string]$path, $when) {
+    $e = $script:upNextSkip[$path.ToLower()]
+    if (-not $e) { return $false }
+    try { return ($when -le [DateTime]$e.Hidden) } catch { return $false }
+}
 # VLC stores resume positions in [RecentsMRL] of vlc-qt-interface.ini:
 # parallel 'list=' (file:/// URIs) and 'times=' (milliseconds; 0 = none).
 # Returned in VLC's own order, which is most-recently-opened first, with
@@ -2656,6 +2696,13 @@ function Add-VideoSections($t, $list, $entries) {
                 $next = $f; break
             }
             if (-not $next -or $taken[$next.FullName.ToLower()]) { continue }
+            # Dismissed by hand, and nothing has been finished in this folder
+            # since - the suggestion is the same one, so it stays gone. The
+            # folder simply retires rather than falling through to the episode
+            # after it: "remove from up next" is asked on a show that has been
+            # seen, and offering its next episode instead would read as the
+            # dismissal having done nothing.
+            if (Test-UpNextSkipped $next.FullName $latest[$d].When) { continue }
             # $d came out of a lower-cased watch key, and Get-ChildItem hands
             # that casing straight back in FullName. Only the parent folder's
             # name is ever shown (the collision rows below), so put its real
@@ -2672,9 +2719,12 @@ function Add-VideoSections($t, $list, $entries) {
             $k = $next.FullName.ToLower()
             $plays = 0
             if ($script:watchMap[$k]) { try { $plays = [int]$script:watchMap[$k].Plays } catch {} }
+            # UpNext marks the row as the suggestion itself, which is the only
+            # place the item menu may offer to dismiss it - the same file
+            # reached through the browser below is just a file.
             $upNext += [pscustomobject]@{
                 Name = $next.Name; Path = $next.FullName; Type = 'File'
-                Plays = $plays; Resume = $null
+                Plays = $plays; Resume = $null; UpNext = $true
             }
             $taken[$k] = $true
         }
@@ -4532,6 +4582,35 @@ function Invoke-GameUninstall($g, [string]$name) {
     else       { Show-Notice "$($g.Name) is still installed - the uninstall wasn't finished." }
 }
 
+# Out of UP NEXT, with the cursor following where the video went so the list
+# doesn't appear to reshuffle under a stationary highlight. Only a video at
+# the tab's root is listed below the section, though - most episodes live in
+# a folder - so the folder it is in is the next best landing, and that is
+# where you would go looking for it anyway. Nothing is forgotten: finishing
+# anything else in that folder brings the section back to life.
+function Remove-UpNextVideo($v) {
+    $path = [string]$v.Path
+    Remove-UpNextEntry $path
+    $t = $script:tabs[$script:tab]
+    $t.Items = @(Get-FileItems $t)
+    $script:items = $t.Items
+    $p = $path.ToLower()
+    for ($i = 0; $i -lt $script:items.Count; $i++) {
+        $it = $script:items[$i]
+        $q = ([string]$it.Path).ToLower()
+        if (-not $q) { continue }
+        $hit = $false
+        if     ($it.Type -eq 'File') { $hit = ($q -eq $p) }
+        elseif ($it.Type -eq 'Dir')  { $hit = $p.StartsWith($q.TrimEnd('\') + '\') }
+        if ($hit) { $script:selected = $i; break }
+    }
+    $script:selected = [Math]::Min($script:selected, [Math]::Max(0, $script:items.Count - 1))
+    Snap-Selection
+    Snap-Viewport
+    Draw-All
+    Show-Notice "$([System.IO.Path]::GetFileName($path)) removed from up next."
+}
+
 # Stays open after each change so a count can be nudged more than once, and
 # rebuilds its own rows every pass to show the new figure in place.
 function Show-VideoMenu($v) {
@@ -4546,6 +4625,14 @@ function Show-VideoMenu($v) {
             if ($e.Path.ToLower() -eq $k) { $resume = [int]$e.Seconds; break }
         }
         $opts = @(); $acts = @()
+        # Only on the row that IS the suggestion, and first, for the same
+        # reason "Mark as completed" is first on a [>>] row: on a row under
+        # the UP NEXT heading it is why the menu was opened. An UP NEXT row
+        # never carries a resume position (a folder holding one is left to
+        # CURRENTLY WATCHING), so the two are never both first.
+        if ($v.UpNext) {
+            $opts += 'Remove from up next'; $acts += 'unnext'
+        }
         # The one-press answer for a half-watched video: "I did watch this."
         # A play recorded as of now plus the partial position cleared - the
         # same pair of writes a watch that ends in the player makes, so the
@@ -4568,6 +4655,10 @@ function Show-VideoMenu($v) {
         $opts += 'Return'; $acts += 'done'
         $c = Pick-Option "$([string]$v.Name)  --  played $plays" $opts
         if ($c -lt 0 -or $acts[$c] -eq 'done') { break }
+        # Straight out rather than round the loop: the row this menu was
+        # opened on has just left the section, so there is nothing left to
+        # come back to. Remove-UpNextVideo does its own redraw.
+        if ($acts[$c] -eq 'unnext') { Remove-UpNextVideo $v; return }
         switch ($acts[$c]) {
             # Record-VideoPlay, not Set-VideoPlays: Last must say NOW, so
             # UP NEXT orders this folder as freshly watched.
@@ -5170,6 +5261,11 @@ try {
                                         # counts and keep CURRENTLY WATCHING full.
                                         $script:resumeMap = @{}
                                         Remove-Item $script:resumeFile -Force -ErrorAction SilentlyContinue
+                                        # Nothing is finished any more, so no
+                                        # UP NEXT suggestion is outstanding and
+                                        # every dismissal of one is dead weight.
+                                        $script:upNextSkip = @{}
+                                        Remove-Item $script:upNextSkipFile -Force -ErrorAction SilentlyContinue
                                     }
                                     Build-Tabs
                                     $script:pendingNotice = 'History cleared'

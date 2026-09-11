@@ -186,6 +186,15 @@ is recorded and the next episode queues under UP NEXT. **SETTINGS →
 Video settings → Counts as watched at** sets where that kicks in (95% of
 the video by default; 100% means only the very end counts).
 
+UP NEXT works out the next episode from the last one you finished, so
+watching a series out of order can leave it offering something you have
+already seen — most obviously at the end of a run, where everything after
+the last episode you happened to finish is already watched. **Y** on that
+row and **Remove from up next** clears it away. It is only that one
+suggestion: finish anything else in the same folder and the show works out
+its next episode again from scratch, so a rewatch later on starts clean
+with nothing to undo.
+
 ## Recently played
 
 Games you have played sit in a RECENTLY PLAYED section at the top of their
@@ -239,7 +248,8 @@ from here, without leaving CLInt. Videos get
 their play count changed — up, down, or back to zero — and a part-watched
 one can be marked as completed (a play is recorded and the resume position
 cleared, so the next episode queues under UP NEXT) or just have its resume
-position cleared.
+position cleared. A video sitting in UP NEXT can be removed from that
+section, for when it suggests an episode already seen.
 
 ## HotKey
 
