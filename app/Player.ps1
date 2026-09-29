@@ -176,6 +176,67 @@ public static extern void libvlc_audio_set_mute(IntPtr mp, int status);
 public static extern int libvlc_video_get_size(IntPtr mp, uint num, out uint px, out uint py);
 '@
 
+# --- Subtitle margin ------------------------------------------------------
+# Lifting the subtitles clear of the overlay means changing "sub-margin" on
+# a video output that is already running, and libvlc's public API has no
+# call for that - VLC's own interface sets the variable on the vout object
+# directly, so this does the same through libvlccore. The vout is found by
+# asking each object under the player whether it HAS the variable (only a
+# vout does), which needs no knowledge of how the tree is arranged.
+#
+# That is reaching past the stable ABI, so it is fenced: libvlc 3.x only
+# (the list struct read here is 3.x's), and a type of its own so that a
+# build missing any of these exports costs the feature and nothing else.
+$script:marginOk = $true
+try {
+    Add-Type -Namespace CLIntVlc -Name Core -MemberDefinition @'
+[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern IntPtr libvlc_get_version();
+[DllImport("libvlccore.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern IntPtr vlc_list_children(IntPtr obj);
+[DllImport("libvlccore.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern void vlc_list_release(IntPtr list);
+[DllImport("libvlccore.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern int var_Type(IntPtr obj, string name);
+[DllImport("libvlccore.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern int var_GetChecked(IntPtr obj, string name, int type, out long val);
+[DllImport("libvlccore.dll", CallingConvention = CallingConvention.Cdecl)]
+private static extern int var_SetChecked(IntPtr obj, string name, int type, long val);
+private const int VLC_VAR_INTEGER = 0x0030;
+public static bool Supported() {
+    string v = Marshal.PtrToStringAnsi(libvlc_get_version());
+    return v != null && v.StartsWith("3.");
+}
+// True when a vout was found. Written only when the value differs: a set
+// wakes the vout, and this is asked five times a second.
+public static bool SetSubMargin(IntPtr obj, int px, int depth) {
+    IntPtr list = vlc_list_children(obj);
+    if (list == IntPtr.Zero) return false;
+    bool hit = false;
+    try {
+        // vlc_list_t: int i_type; int i_count; vlc_value_t *p_values - and a
+        // vlc_value_t is eight bytes on either bitness.
+        int n = Marshal.ReadInt32(list, 4);
+        IntPtr vals = Marshal.ReadIntPtr(list, 8);
+        if (n < 0 || n > 64 || vals == IntPtr.Zero) return false;
+        for (int i = 0; i < n; i++) {
+            IntPtr child = Marshal.ReadIntPtr(vals, i * 8);
+            if (child == IntPtr.Zero) continue;
+            if (var_Type(child, "sub-margin") != 0) {
+                long cur;
+                if (var_GetChecked(child, "sub-margin", VLC_VAR_INTEGER, out cur) != 0 || cur != px)
+                    var_SetChecked(child, "sub-margin", VLC_VAR_INTEGER, px);
+                hit = true;
+            } else if (depth > 1 && SetSubMargin(child, px, depth - 1)) {
+                hit = true;
+            }
+        }
+    } finally { vlc_list_release(list); }
+    return hit;
+}
+'@
+} catch { $script:marginOk = $false }
+
 # --- Native gamepad input (XInput) -------------------------------------
 # The same reading CLInt's menu does, minus the auto-repeat table: a video
 # player repeats different things (seek and volume, never a track cycle),
@@ -285,6 +346,9 @@ $vlcArgs = @(
 )
 $inst = [CLIntVlc.N]::libvlc_new($vlcArgs.Count, $vlcArgs)
 if ($inst -eq [IntPtr]::Zero) { exit 2 }
+if ($script:marginOk) {
+    try { $script:marginOk = [CLIntVlc.Core]::Supported() } catch { $script:marginOk = $false }
+}
 
 # --------------------------------------------------------------- state ---
 $script:mp        = [IntPtr]::Zero
@@ -659,11 +723,50 @@ function Show-Osd([string]$note = '', [int]$ms = 3000) {
     $script:osdUntil = [Environment]::TickCount + $ms
     if (-not $osd.Visible) { $osd.Show($form) }
     $osd.Invalidate()
+    Sync-SubMargin
 }
 
 function Hide-Osd {
     $script:osdUntil = 0
     if ($osd.Visible -and -not $script:osdPinned) { $osd.Hide() }
+    Sync-SubMargin
+}
+
+# Subtitles ride above the strip while it is up and drop back when it goes,
+# so the two never share the same rows. The strip covers the bottom of the
+# WINDOW and subtitles are placed off the bottom of the PICTURE, so a film
+# with black bars of its own has already cleared part of the strip - only
+# the rest is asked for, or a letterboxed film's subtitles would jump
+# further than the strip is tall.
+#
+# Called from the tick as well as from show and hide: a vout does not exist
+# until a moment after play(), which is after the strip first goes up, and
+# the strip has ways of leaving (the pin toggle) that do not pass through
+# Hide-Osd.
+function Sync-SubMargin {
+    if (-not $script:marginOk -or $script:mp -eq [IntPtr]::Zero) { return }
+    try {
+        $px = 0
+        if ($osd.Visible) {
+            $px = $osd.Height
+            $b  = Get-PlayerBounds
+            $vw = [uint32]0; $vh = [uint32]0
+            if ([CLIntVlc.N]::libvlc_video_get_size($script:mp, 0, [ref]$vw, [ref]$vh) -eq 0 -and
+                $vw -gt 0 -and $vh -gt 0 -and $b.Width -gt 0) {
+                $picH = [Math]::Min([double]$b.Height, $b.Width * [double]$vh / $vw)
+                $px  -= [int](($b.Height - $picH) / 2)
+                # The margin is counted in the pixels subtitles are DRAWN
+                # in, and VLC draws them at the film's own size whenever
+                # that is bigger than the window (measured: on a 4K file
+                # the unscaled figure moved them a third of the way).
+                if ($px -gt 0 -and $picH -ge 1 -and $vh -gt $picH) {
+                    $px = [int][Math]::Ceiling($px * $vh / $picH)
+                }
+            }
+            $px = [Math]::Max(0, $px)
+        }
+        [CLIntVlc.Core]::SetSubMargin($script:mp, $px, 3) | Out-Null
+    } catch { $script:marginOk = $false }
 }
 
 # The corner card: one line of text, top-right, the way VLC announces a
@@ -1413,6 +1516,7 @@ $timer.Add_Tick({
             $osd.Invalidate()
         }
     }
+    Sync-SubMargin
 
     if ($toast.Visible -and $script:toastUntil -and [Environment]::TickCount -gt $script:toastUntil) {
         $script:toastText  = ''

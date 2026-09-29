@@ -179,7 +179,8 @@ window is dragged to is where the menu comes back.
 Subtitles start off. **SETTINGS → Video settings → Subtitles on by
 default** turns them on, and works both for an `.srt` sitting beside the
 video and for tracks built into the file itself. X switches between them
-either way.
+either way. While the bar along the bottom is showing, subtitles move up
+to sit above it, and drop back when it goes.
 
 Stopping when the credits roll counts as watching to the end — the play
 is recorded and the next episode queues under UP NEXT. **SETTINGS →
