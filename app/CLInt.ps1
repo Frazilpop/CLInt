@@ -2119,6 +2119,7 @@ function Hint([string]$s) {
 $showClock       = $settings['ShowClock']       -ne $false
 $showBattery     = $settings['ShowBattery']     -ne $false
 $recentEnabled   = $settings['Recent']          -ne $false
+$groupNonSteam   = $settings['GroupNonSteam']   -eq $true
 $playtimeEnabled = $settings['Playtime']        -ne $false
 $offlinePlaytime = $settings['OfflinePlaytime'] -ne $false
 $sessionTimeOn   = $settings['SessionTime']     -ne $false
@@ -2486,22 +2487,43 @@ function Sort-Games($list) {
     $list = @($list | Where-Object { -not $_.Unselectable })   # strip old section rows before re-sorting
     # (No empty-recentMap shortcut: with nothing of our own recorded, Steam's
     # own LastPlayed stamps can still fill the section.)
-    if (-not $script:recentEnabled) { return @($list) }
     $recent = @(); $rest = @()
     foreach ($g in $list) {
-        if (Test-RecentGame $g) { $recent += $g } else { $rest += $g }
+        if ($script:recentEnabled -and (Test-RecentGame $g)) { $recent += $g } else { $rest += $g }
     }
-    if ($recent.Count -eq 0) { return @($rest) }
-    $recent = @($recent | Sort-Object {
-        $s = Get-RecentStamp $_
-        if ($null -eq $s) { [DateTime]::MinValue } else { $s }
-    } -Descending)
-    $out = @([pscustomobject]@{ Name = 'RECENTLY PLAYED'; Unselectable = $true })
-    $out += $recent
-    if ($rest.Count -gt 0) {
-        $out += [pscustomobject]@{ Name = '';    Unselectable = $true }   # blank spacer row
-        $out += [pscustomobject]@{ Name = 'A-Z'; Unselectable = $true }
-        $out += $rest
+    # The list handed in on a re-sort is the previous result, so a game that
+    # has just left the recent section arrives at the top of it - put the
+    # remainder back in name order rather than trusting the order it came in.
+    $rest = @($rest | Sort-Object Name)
+    # Non-Steam apps in their own section at the bottom (Game settings,
+    # off unless asked for). Only a Steam library's shortcuts carry
+    # Steam = $false - a Shortcuts tab's rows have no such property, so
+    # those tabs never grow the section. A recently played one still sits
+    # in RECENTLY PLAYED: that section is about when, this one about what.
+    $other = @()
+    if ($script:groupNonSteam) {
+        $other = @($rest | Where-Object { $false -eq $_.Steam })
+        $rest  = @($rest | Where-Object { $false -ne $_.Steam })
+    }
+    if ($recent.Count -eq 0 -and $other.Count -eq 0) { return @($rest) }
+    $out = @()
+    if ($recent.Count -gt 0) {
+        $recent = @($recent | Sort-Object {
+            $s = Get-RecentStamp $_
+            if ($null -eq $s) { [DateTime]::MinValue } else { $s }
+        } -Descending)
+        $out += [pscustomobject]@{ Name = 'RECENTLY PLAYED'; Unselectable = $true }
+        $out += $recent
+        if ($rest.Count -gt 0) {
+            $out += [pscustomobject]@{ Name = '';    Unselectable = $true }   # blank spacer row
+            $out += [pscustomobject]@{ Name = 'A-Z'; Unselectable = $true }
+        }
+    }
+    $out += $rest
+    if ($other.Count -gt 0) {
+        if ($out.Count -gt 0) { $out += [pscustomobject]@{ Name = ''; Unselectable = $true } }   # blank spacer row
+        $out += [pscustomobject]@{ Name = 'NON-STEAM GAMES'; Unselectable = $true }
+        $out += $other
     }
     return @($out)
 }
@@ -2896,6 +2918,12 @@ function Get-GameSettingsItems {
     $list = @()
     $list += [pscustomobject]@{ Key = 'NonSteam'
                                 Name = ('Non-Steam apps in Steam tabs'.PadRight(30) + $(if ($script:nonSteamEnabled) { 'on' } else { 'off' })) }
+    # Where those apps sit. Only there while they are listed at all, so it
+    # is never a setting for something switched off.
+    if ($script:nonSteamEnabled) {
+        $list += [pscustomobject]@{ Key = 'GroupNonSteam'
+                                    Name = ('Non-Steam games at bottom'.PadRight(30) + $(if ($script:groupNonSteam) { 'on' } else { 'off' })) }
+    }
     $list += [pscustomobject]@{ Key = 'Recent'
                                 Name = ('Recently played first'.PadRight(30) + $(if ($script:recentEnabled) { 'on' } else { 'off' })) }
     # How far back that section reaches. Only there while the section is,
@@ -4165,6 +4193,12 @@ function Invoke-SettingsAction([string]$key) {
             try { $script:games = @(Get-SteamLibrary) } catch { $script:games = @() }
             Add-MaProfileTags $games
             Build-Tabs   # rebuild Steam tabs with/without non-Steam apps
+        }
+        'GroupNonSteam' {
+            $script:groupNonSteam = -not $script:groupNonSteam
+            $settings['GroupNonSteam'] = $script:groupNonSteam
+            Save-Settings
+            Build-Tabs   # re-split the Steam tabs with/without the section
         }
         'Recent' {
             $script:recentEnabled = -not $script:recentEnabled

@@ -16,7 +16,9 @@ A minimalist interface with configurable tabs to load the following:
 
 - **STEAM GAMES** — scans Steam's appmanifest and
   launches via `steam://`. Non-Steam shortcuts from `shortcuts.vdf` work
-  too.
+  too, mixed in with the rest or — with **SETTINGS → Game settings →
+  Non-Steam games at bottom** turned on — in a NON-STEAM GAMES section of
+  their own below the Steam ones.
 - **LOCAL GAMES** — launches `.lnk` shortcuts from a configurable folder,
   tracking the game by its target exe.
 - **VIDEOS** — a folder browser that plays video files, in CLInt's own
