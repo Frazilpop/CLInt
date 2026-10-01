@@ -377,7 +377,9 @@ $script:osdNote   = ''           # transient right-hand message ("Volume 60%")
 $script:quitting  = $false
 # Subtitle auto-pick, once per file. See the block in the timer that uses it.
 $script:subsPicked = $false
-$script:subsUntil  = 0
+# Tick count a file's track lists are taken as complete at; $null until the
+# file is first seen playing. See Test-TracksPending.
+$script:tracksUntil = $null
 # For a few hundred ms after a seek libvlc still reports the OLD position,
 # which would snap the clock and the bar back to where they just came from.
 # Our own figure is the right one until the demuxer catches up.
@@ -1106,9 +1108,9 @@ function Start-File([string]$path) {
     $script:lastLen  = 0
     $script:subsPicked = $false
     $script:aspectDone = $false   # each file gets one windowed aspect fit (see the tick)
-    # Tracks are not known the instant play() returns, so the auto-pick gets
-    # a few seconds to find them before it gives up on this file.
-    $script:subsUntil  = [Environment]::TickCount + 8000
+    # Tracks are not known the instant play() returns; the timer starts the
+    # clock on them once the file is actually playing.
+    $script:tracksUntil = $null
     $script:media = [CLIntVlc.N]::libvlc_media_new_path($inst, $path)
     if ($script:media -eq [IntPtr]::Zero) { return $false }
     $script:mp = [CLIntVlc.N]::libvlc_media_player_new_from_media($script:media)
@@ -1201,10 +1203,24 @@ function Adjust-Volume([int]$delta) {
 # Subtitle and audio cycling share a shape: read the list, find where we
 # are, step to the next entry, wrap. "Disable" is a real entry in both
 # lists (id -1), so switching subtitles off is just another step round.
+#
+# A file's tracks turn up a moment after it opens, so for its first few
+# seconds a short list only means "not loaded yet". Saying "No subtitles"
+# then is simply wrong half the time - the same press a second later finds
+# them - so until the lists have had their chance, a press that finds
+# nothing to step to says nothing at all.
+function Test-TracksPending {
+    if ($null -eq $script:tracksUntil) { return $true }
+    return [Environment]::TickCount -lt $script:tracksUntil
+}
+
 function Step-Spu {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $tracks = Get-TrackList ([CLIntVlc.N]::libvlc_video_get_spu_description($script:mp))
-    if ($tracks.Count -le 1) { Show-Note 'No subtitles'; return }
+    if ($tracks.Count -le 1) {
+        if (-not (Test-TracksPending)) { Show-Note 'No subtitles' }
+        return
+    }
     $cur = [CLIntVlc.N]::libvlc_video_get_spu($script:mp)
     $i = 0
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
@@ -1217,7 +1233,10 @@ function Step-Audio {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $tracks = @(Get-TrackList ([CLIntVlc.N]::libvlc_audio_get_track_description($script:mp)) |
                 Where-Object { $_.Id -ne -1 })   # muting by cycling tracks is a trap, not a feature
-    if ($tracks.Count -le 1) { Show-Note 'One audio track'; return }
+    if ($tracks.Count -le 1) {
+        if (-not (Test-TracksPending)) { Show-Note 'One audio track' }
+        return
+    }
     $cur = [CLIntVlc.N]::libvlc_audio_get_track($script:mp)
     $i = 0
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
@@ -1448,6 +1467,14 @@ $timer.Add_Tick({
     #
     # Once per file, so whichever way the user takes it with X afterwards
     # sticks instead of being undone on the next tick.
+    #
+    # The few seconds the track lists get to fill in are counted from the
+    # first tick the file is seen playing (or paused - a pause can land
+    # between two ticks), not from the open: a slow drive can spend longer
+    # than that just getting there.
+    if ($null -eq $script:tracksUntil -and ($st -eq 3 -or $st -eq 4)) {
+        $script:tracksUntil = [Environment]::TickCount + 5000
+    }
     if (-not $script:subsPicked -and $st -eq 3) {
         $subs = Get-TrackList ([CLIntVlc.N]::libvlc_video_get_spu_description($script:mp))
         if ($subs.Count -gt 1) {
@@ -1462,7 +1489,7 @@ $timer.Add_Tick({
             } elseif ($cur -ne -1) {
                 [CLIntVlc.N]::libvlc_video_set_spu($script:mp, -1) | Out-Null
             }
-        } elseif ([Environment]::TickCount -ge $script:subsUntil) {
+        } elseif (-not (Test-TracksPending)) {
             $script:subsPicked = $true      # this file has none; stop asking
         }
     }
