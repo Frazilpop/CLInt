@@ -191,11 +191,14 @@ public interface IPropStore {
     [PreserveSig] int SetValue(ref PKEY k, ref PVAR v);
     [PreserveSig] int Commit();
 }
-[ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface ITaskbarList {
+[ComImport, Guid("602D4995-B13A-429b-A66E-1935E44F4317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ITaskbarList {   // ITaskbarList2
     [PreserveSig] int HrInit();
     [PreserveSig] int AddTab(IntPtr hwnd);
     [PreserveSig] int DeleteTab(IntPtr hwnd);
+    [PreserveSig] int ActivateTab(IntPtr hwnd);
+    [PreserveSig] int SetActiveAlt(IntPtr hwnd);
+    [PreserveSig] int MarkFullscreenWindow(IntPtr hwnd, [MarshalAs(UnmanagedType.Bool)] bool full);
 }
 static void PutProp(IPropStore ps, uint pid, string val) {
     PKEY k = new PKEY(); k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"); k.pid = pid;
@@ -219,9 +222,15 @@ public static bool SetAppIdentity(IntPtr hwnd, string id, string command, string
     } finally { Marshal.ReleaseComObject(ps); }
     return true;
 }
-public static void TaskbarTab(IntPtr hwnd, bool show) {
+// A button going back on can be marked fullscreen in the same breath - see
+// Set-MenuTab for why it has to be.
+public static void TaskbarTab(IntPtr hwnd, bool show, bool fullscreen) {
     ITaskbarList t = (ITaskbarList)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11d0-958A-006097C9A090")));
-    try { t.HrInit(); if (show) t.AddTab(hwnd); else t.DeleteTab(hwnd); }
+    try {
+        t.HrInit();
+        if (show) { t.AddTab(hwnd); if (fullscreen) t.MarkFullscreenWindow(hwnd, true); }
+        else t.DeleteTab(hwnd);
+    }
     finally { Marshal.ReleaseComObject(t); }
 }
 '@
@@ -1042,11 +1051,39 @@ function Set-MenuVisible([bool]$show) {
 # given back on the way out, so there is only ever one CLInt down there.
 # CLInt re-adds it itself when it comes back (Show-MenuWindow), which
 # covers a player that was killed before it could.
+#
+# A button put back has lost what the taskbar knew about its window - that
+# it is fullscreen, and so something to stay behind. Left at that, the
+# taskbar jumps in front of the menu the moment this window goes, and
+# stays there until CLInt notices the player has exited and says so itself
+# (measured: on top for a third of a second after every fullscreen film,
+# v1.5.1). So a fullscreen menu's button goes back already marked, while
+# the film is still covering the screen, and the taskbar never moves.
 function Set-MenuTab([bool]$show) {
     if ($script:menuHwnd -eq [IntPtr]::Zero) { return }
     try {
-        if ([CLIntVlc.N]::IsWindow($script:menuHwnd)) { [CLIntVlc.N]::TaskbarTab($script:menuHwnd, $show) }
+        if (-not [CLIntVlc.N]::IsWindow($script:menuHwnd)) { return }
+        $full = $false
+        if ($show) {
+            $mr = New-Object CLIntVlc.N+RECT
+            if ([CLIntVlc.N]::GetWindowRect($script:menuHwnd, [ref]$mr)) {
+                $full = Test-CoversScreen (New-Object Drawing.Rectangle($mr.L, $mr.T, ($mr.R - $mr.L), ($mr.B - $mr.T)))
+            }
+        }
+        [CLIntVlc.N]::TaskbarTab($script:menuHwnd, $show, $full)
     } catch {}
+}
+
+# A console covering its screen IS a fullscreen console: conhost's
+# fullscreen has no frame and takes the whole monitor, while CLInt's
+# windowed menu is a miniature of it - $windowedFontScale, 75% of the
+# screen in each direction. The two are far enough apart that the line
+# goes between them rather than at the edge: an exact-rect test would have
+# to assume conhost sizes its fullscreen window to the pixel, and anything
+# it leaves over is grid remainder we cannot predict.
+function Test-CoversScreen([Drawing.Rectangle]$rect) {
+    $scrB = [Windows.Forms.Screen]::FromRectangle($rect).Bounds
+    return ($rect.Width -ge ($scrB.Width * 0.9) -and $rect.Height -ge ($scrB.Height * 0.9))
 }
 
 function Set-PlayerDisplay([bool]$full) {
@@ -1159,17 +1196,7 @@ if ($script:menuHwnd -ne [IntPtr]::Zero) {
             ($mr.R - $mr.L) -ge 320 -and ($mr.B - $mr.T) -ge 240) {
             $script:menuRect = New-Object Drawing.Rectangle(
                 $mr.L, $mr.T, ($mr.R - $mr.L), ($mr.B - $mr.T))
-            # A console covering its screen IS a fullscreen console:
-            # conhost's fullscreen has no frame and takes the whole
-            # monitor, while CLInt's windowed menu is a miniature of it -
-            # $windowedFontScale, 75% of the screen in each direction. The
-            # two are far enough apart that the line goes between them
-            # rather than at the edge: an exact-rect test would have to
-            # assume conhost sizes its fullscreen window to the pixel, and
-            # anything it leaves over is grid remainder we cannot predict.
-            $scrB = [Windows.Forms.Screen]::FromRectangle($script:menuRect).Bounds
-            $openWindowed = -not ($script:menuRect.Width  -ge ($scrB.Width  * 0.9) -and
-                                  $script:menuRect.Height -ge ($scrB.Height * 0.9))
+            $openWindowed = -not (Test-CoversScreen $script:menuRect)
         }
     } catch {}
 }

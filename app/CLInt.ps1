@@ -1657,6 +1657,10 @@ function Show-MenuWindow {
                 # ...and a re-added button no longer knows the window is
                 # fullscreen - see Set-TaskbarFullscreen. Read off the
                 # glass: the mode may have changed while the film was up.
+                # The player marks the button itself as it hands it back
+                # (its Set-MenuTab) - by here the film has been gone a
+                # third of a second, and the taskbar spent it on top of
+                # the menu (v1.5.1). This is the net for a killed player.
                 $dm = [uint32]0
                 if ([CLI.Native]::GetConsoleDisplayMode([ref]$dm)) { Set-TaskbarFullscreen ([bool]($dm -band 1)) }
             }
