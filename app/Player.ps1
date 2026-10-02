@@ -174,6 +174,56 @@ public static extern int libvlc_audio_set_volume(IntPtr mp, int volume);
 public static extern void libvlc_audio_set_mute(IntPtr mp, int status);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern int libvlc_video_get_size(IntPtr mp, uint num, out uint px, out uint py);
+
+// --- taskbar identity: the same one CLInt puts on its own window (see
+// Set-MenuIdentity there), so the menu and the film are one button.
+[DllImport("user32.dll")]
+public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("shell32.dll")]
+static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, out IPropStore store);
+[StructLayout(LayoutKind.Sequential, Pack = 4)] public struct PKEY { public Guid fmtid; public uint pid; }
+[StructLayout(LayoutKind.Explicit, Size = 24)] public struct PVAR { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPropStore {
+    [PreserveSig] int GetCount(out uint c);
+    [PreserveSig] int GetAt(uint i, out PKEY k);
+    [PreserveSig] int GetValue(ref PKEY k, out PVAR v);
+    [PreserveSig] int SetValue(ref PKEY k, ref PVAR v);
+    [PreserveSig] int Commit();
+}
+[ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ITaskbarList {
+    [PreserveSig] int HrInit();
+    [PreserveSig] int AddTab(IntPtr hwnd);
+    [PreserveSig] int DeleteTab(IntPtr hwnd);
+}
+static void PutProp(IPropStore ps, uint pid, string val) {
+    PKEY k = new PKEY(); k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"); k.pid = pid;
+    PVAR v = new PVAR();
+    if (val != null) { v.vt = 31; v.p = Marshal.StringToCoTaskMemUni(val); }   // VT_LPWSTR
+    ps.SetValue(ref k, ref v);
+    if (val != null) Marshal.FreeCoTaskMem(v.p);
+}
+// System.AppUserModel.* on one window: RelaunchCommand (2),
+// RelaunchIconResource (3), RelaunchDisplayNameResource (4), then ID (5).
+public static bool SetAppIdentity(IntPtr hwnd, string id, string command, string icon, string name) {
+    Guid iid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+    IPropStore ps;
+    if (SHGetPropertyStoreForWindow(hwnd, ref iid, out ps) != 0 || ps == null) return false;
+    try {
+        PutProp(ps, 2, command);
+        PutProp(ps, 3, icon);
+        PutProp(ps, 4, command == null ? null : name);
+        PutProp(ps, 5, id);
+        ps.Commit();
+    } finally { Marshal.ReleaseComObject(ps); }
+    return true;
+}
+public static void TaskbarTab(IntPtr hwnd, bool show) {
+    ITaskbarList t = (ITaskbarList)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11d0-958A-006097C9A090")));
+    try { t.HrInit(); if (show) t.AddTab(hwnd); else t.DeleteTab(hwnd); }
+    finally { Marshal.ReleaseComObject(t); }
+}
 '@
 
 # --- Subtitle margin ------------------------------------------------------
@@ -424,7 +474,7 @@ function Save-State {
         # rides with it so the menu can come back in the PLACE the film was
         # left in too - the swap keeps using the one spot the user chose.
         # The live frame when it is still up; the remembered one (kept by
-        # the toggle and the aspect fit) when the form is already gone.
+        # the toggle) when the form is already gone.
         $state = @{ Results = $rows; Windowed = (-not $script:isFull) }
         if (-not $script:isFull) {
             $b = $null
@@ -707,8 +757,35 @@ $form.BackColor       = [Drawing.Color]::Black
 # up as a maximized-with-border window (measured, v1.4.0).
 if (-not $Windowed) { $form.WindowState = 'Maximized' }
 $form.KeyPreview      = $true
-$form.ShowInTaskbar   = $false
 $form.TopMost         = $true
+# One CLInt on the taskbar, whichever face it is showing. This window
+# carries CLInt's icon and the same app identity as the menu's console,
+# and while a film is up it holds the only button: the menu's own is taken
+# away at Shown and handed back at FormClosing (see Set-MenuTab). So the
+# button under a windowed film - where the menu is hidden outright and
+# used to leave nothing down there at all - and the one left after the
+# menu key puts everything away are both this one, and clicking it brings
+# the film back.
+$script:appIco = Join-Path $PSScriptRoot 'CLInt.ico'
+if (Test-Path $script:appIco) {
+    try { $form.Icon = New-Object Drawing.Icon($script:appIco) } catch {}
+}
+$form.Add_HandleCreated({
+    try {
+        $launch  = Join-Path (Split-Path $PSScriptRoot -Parent) 'Launch.ps1'
+        $command = $null
+        if (Test-Path $launch) {
+            $command = "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launch`""
+        }
+        $icon = if (Test-Path $script:appIco) { "$($script:appIco),0" } else { $null }
+        [CLIntVlc.N]::SetAppIdentity($form.Handle, 'CLInt.Launcher', $command, $icon, 'CLInt') | Out-Null
+    } catch {}
+    # No opening animation: the film CUTS in over the menu, the way a
+    # screen of one program replaces another, rather than gliding up like
+    # a second program starting. Put back once the window is on screen
+    # (see Shown), so the menu key's minimize keeps its glide.
+    try { [CLIntVlc.N]::SetTransitions($form.Handle, $false) } catch {}
+})
 
 # Opaque, in the theme's own background. The console has no transparency to
 # be consistent with, and a strip you can see the film through is the one
@@ -945,6 +1022,10 @@ if ($StateFile) {
 
 function Set-MenuVisible([bool]$show) {
     if ($script:menuHwnd -eq [IntPtr]::Zero) { return }
+    # A windowed LAUNCH hides the menu only once this window is on screen
+    # in its place (see Shown) - hidden before that, there is a beat with
+    # neither of them up and the desktop showing through.
+    if (-not $show -and $script:preShow) { return }
     try {
         if (-not [CLIntVlc.N]::IsWindow($script:menuHwnd)) { return }
         if ($show) {
@@ -954,6 +1035,17 @@ function Set-MenuVisible([bool]$show) {
         } elseif ([CLIntVlc.N]::IsWindowVisible($script:menuHwnd)) {
             [CLIntVlc.N]::ShowWindow($script:menuHwnd, 0) | Out-Null       # SW_HIDE
         }
+    } catch {}
+}
+
+# The menu's taskbar button, taken away for as long as the film is up and
+# given back on the way out, so there is only ever one CLInt down there.
+# CLInt re-adds it itself when it comes back (Show-MenuWindow), which
+# covers a player that was killed before it could.
+function Set-MenuTab([bool]$show) {
+    if ($script:menuHwnd -eq [IntPtr]::Zero) { return }
+    try {
+        if ([CLIntVlc.N]::IsWindow($script:menuHwnd)) { [CLIntVlc.N]::TaskbarTab($script:menuHwnd, $show) }
     } catch {}
 }
 
@@ -1084,13 +1176,14 @@ if ($script:menuHwnd -ne [IntPtr]::Zero) {
 if ($openWindowed) {
     # A windowed film takes the STAGE the menu occupied: same frame, same
     # spot, so the launcher and the player read as one window swapping
-    # faces rather than two windows in two places. The tick's aspect fit
-    # then trims the height to the picture's own shape. Falls back to
+    # faces rather than two windows in two places. Falls back to
     # Set-PlayerDisplay's 75%-centred default when the menu window is
     # unknown (standalone run, stale hwnd).
     if ($script:menuRect) { $script:winBounds = $script:menuRect }
     $form.StartPosition = 'Manual'
+    $script:preShow = $true
     Set-PlayerDisplay $false
+    $script:preShow = $false
 } elseif ($Windowed) {
     # Handed a windowed launch, but the menu went fullscreen while we were
     # loading. The form never passed through Maximized on the way up (see
@@ -1107,7 +1200,6 @@ function Start-File([string]$path) {
     $script:lastTime = 0
     $script:lastLen  = 0
     $script:subsPicked = $false
-    $script:aspectDone = $false   # each file gets one windowed aspect fit (see the tick)
     # Tracks are not known the instant play() returns; the timer starts the
     # clock on them once the file is actually playing.
     $script:tracksUntil = $null
@@ -1494,40 +1586,14 @@ $timer.Add_Tick({
         }
     }
 
-    # One windowed aspect fit per file: once VLC knows the picture's real
-    # dimensions, trim the frame to that shape - same top-left, same width,
-    # height from the video's own aspect - so a 16:9 film gets a 16:9
-    # window instead of the menu's letterboxed rectangle. Once, so a frame
-    # the user then resizes by hand stays resized; and only from 'Normal'
-    # (never mid-minimize, never fullscreen). Clamped to the working area:
-    # a portrait video scales its width down rather than growing off-screen.
-    if (-not $script:aspectDone -and -not $script:isFull -and
-        $form.WindowState -eq 'Normal' -and $st -eq 3) {
-        $vw = [uint32]0; $vh = [uint32]0
-        if ([CLIntVlc.N]::libvlc_video_get_size($script:mp, 0, [ref]$vw, [ref]$vh) -eq 0 -and
-            $vw -gt 0 -and $vh -gt 0) {
-            $script:aspectDone = $true
-            try {
-                $b = $form.Bounds
-                $chromeW = $b.Width  - $form.ClientSize.Width
-                $chromeH = $b.Height - $form.ClientSize.Height
-                $wa = [Windows.Forms.Screen]::FromControl($form).WorkingArea
-                $newW = $b.Width
-                $newH = [int][Math]::Round(($newW - $chromeW) * $vh / $vw) + $chromeH
-                if ($newH -gt $wa.Height) {
-                    $newH = $wa.Height
-                    $newW = [int][Math]::Round(($newH - $chromeH) * $vw / $vh) + $chromeW
-                }
-                if ([Math]::Abs($newH - $b.Height) -gt 8 -or [Math]::Abs($newW - $b.Width) -gt 8) {
-                    $x = [Math]::Min([Math]::Max($b.X, $wa.X), $wa.Right  - $newW)
-                    $y = [Math]::Min([Math]::Max($b.Y, $wa.Y), $wa.Bottom - $newH)
-                    $form.Bounds = New-Object Drawing.Rectangle($x, $y, $newW, $newH)
-                    $script:winBounds = $form.Bounds
-                    Place-Osd
-                }
-            } catch {}
-        }
-    }
+    # A windowed film keeps the frame it was given - the menu's own. It
+    # used to be trimmed to the picture's shape once the size was known,
+    # so the window changed size a moment after the film started (a few
+    # pixels for a 16:9 film in the menu's not-quite-16:9 frame, a lot
+    # for anything wider) and changed again when the menu came back at
+    # its own size: two windows trading places, not one window showing a
+    # film. The picture letterboxes inside the frame exactly as it does
+    # fullscreen, and the frame is still the user's to drag to any shape.
 
     if ($st -eq 6 -or $st -eq 7) {        # Ended / Error
         if ($st -eq 6) { $script:lastTime = $script:lastLen }   # ran to the end: a watch, not a bail
@@ -1602,6 +1668,13 @@ $form.Add_Shown({
     Place-Osd
     $form.Activate()
     [CLIntVlc.N]::SetForegroundWindow($form.Handle) | Out-Null
+    # On screen now, so the hand-over can finish: this window's button
+    # replaces the menu's, and a windowed film - sitting exactly where the
+    # menu is - lets the menu go from underneath it, painted first so what
+    # the menu uncovers is the film's frame and never the desktop.
+    Set-MenuTab $false
+    if (-not $script:isFull) { $form.Update(); Set-MenuVisible $false }
+    try { [CLIntVlc.N]::SetTransitions($form.Handle, $true) } catch {}
     # Only fullscreen swallows the pointer; a windowed launch keeps it -
     # a frame you cannot see your mouse on cannot be moved or resized.
     if ($script:isFull) { [Windows.Forms.Cursor]::Hide(); $script:cursorHidden = $true }
@@ -1615,6 +1688,24 @@ $form.Add_FormClosing({
     $timer.Stop()
     Stop-Current
     Save-State
+    # The hand-back, done while this window is still up so there is no
+    # beat with nothing on screen: the menu gets its button back, and under
+    # a windowed film it is put where the film's frame is and shown BEHIND
+    # it (never activated - CLInt takes the foreground itself a moment
+    # later). Then this window goes with no closing animation, and what is
+    # underneath is already the menu, in the same spot. Position only: the
+    # console's size is owned by its grid and font.
+    try { [CLIntVlc.N]::SetTransitions($form.Handle, $false) } catch {}
+    Set-MenuTab $true
+    if (-not $script:isFull -and $script:menuHwnd -ne [IntPtr]::Zero) {
+        try {
+            if ($form.WindowState -eq 'Normal') {
+                [CLIntVlc.N]::SetWindowPos($script:menuHwnd, $form.Handle, $form.Left, $form.Top, 0, 0,
+                    0x0011) | Out-Null   # NOSIZE | NOACTIVATE, z-order: directly behind the film
+            }
+        } catch {}
+        Set-MenuVisible $true
+    }
 })
 
 $code = 0
@@ -1637,6 +1728,7 @@ try {
     # Quitting from windowed mode must not leave the menu hidden - it is
     # about to take the screen back.
     try { Set-MenuVisible $true } catch {}
+    try { Set-MenuTab $true } catch {}
     try { [CLIntVlc.N]::KeepAwake($false) } catch {}
     try { [CLIntVlc.N]::libvlc_release($inst) } catch {}
 }

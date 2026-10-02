@@ -174,9 +174,11 @@ windowed CLInt opens films windowed, and however the film is left when it
 ends is how the menu returns. The choice is remembered — leave CLInt
 windowed and it starts windowed next time too (the SETTINGS toggle and
 the in-film toggle both save it). The place carries across with it: the
-film opens in the spot the menu occupied — trimmed to the video's own
-aspect, so a 16:9 film gets a 16:9 window — and wherever the film's
-window is dragged to is where the menu comes back.
+film opens in the very frame the menu occupied, so it reads as one window
+changing what it shows, and wherever the film's window is dragged to is
+where the menu comes back.
+
+Menu and film share one taskbar button, with CLInt's own icon.
 
 Subtitles start off. **SETTINGS → Video settings → Subtitles on by
 default** turns them on, and works both for an `.srt` sitting beside the

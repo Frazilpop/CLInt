@@ -1441,6 +1441,69 @@ try {
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+
+// --- taskbar identity (see Set-MenuIdentity) ---
+[DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadImage(IntPtr inst, string name, uint type, int cx, int cy, uint flags);
+[DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, out IPropStore store);
+[StructLayout(LayoutKind.Sequential, Pack = 4)] public struct PKEY { public Guid fmtid; public uint pid; }
+[StructLayout(LayoutKind.Explicit, Size = 24)] public struct PVAR { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPropStore {
+    [PreserveSig] int GetCount(out uint c);
+    [PreserveSig] int GetAt(uint i, out PKEY k);
+    [PreserveSig] int GetValue(ref PKEY k, out PVAR v);
+    [PreserveSig] int SetValue(ref PKEY k, ref PVAR v);
+    [PreserveSig] int Commit();
+}
+[ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ITaskbarList {
+    [PreserveSig] int HrInit();
+    [PreserveSig] int AddTab(IntPtr hwnd);
+    [PreserveSig] int DeleteTab(IntPtr hwnd);
+}
+static void PutProp(IPropStore ps, uint pid, string val) {
+    PKEY k = new PKEY(); k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"); k.pid = pid;
+    PVAR v = new PVAR();                       // vt 0 = VT_EMPTY, which clears the property
+    if (val != null) { v.vt = 31; v.p = Marshal.StringToCoTaskMemUni(val); }   // VT_LPWSTR
+    ps.SetValue(ref k, ref v);
+    if (val != null) Marshal.FreeCoTaskMem(v.p);
+}
+// System.AppUserModel.* on ONE window: RelaunchCommand (2), RelaunchIconResource
+// (3), RelaunchDisplayNameResource (4), then ID (5) last. A null id clears all four.
+public static bool SetAppIdentity(IntPtr hwnd, string id, string command, string icon, string name) {
+    Guid iid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+    IPropStore ps;
+    if (SHGetPropertyStoreForWindow(hwnd, ref iid, out ps) != 0 || ps == null) return false;
+    try {
+        PutProp(ps, 2, id == null ? null : command);
+        PutProp(ps, 3, id == null ? null : icon);
+        PutProp(ps, 4, id == null || command == null ? null : name);
+        PutProp(ps, 5, id);
+        ps.Commit();
+    } finally { Marshal.ReleaseComObject(ps); }
+    return true;
+}
+static IntPtr prevBig, prevSmall; static bool iconSet;
+public static void SetWindowIcon(IntPtr hwnd, string ico) {
+    IntPtr big   = LoadImage(IntPtr.Zero, ico, 1, 32, 32, 0x10);   // IMAGE_ICON, LR_LOADFROMFILE
+    IntPtr small = LoadImage(IntPtr.Zero, ico, 1, 16, 16, 0x10);
+    if (big == IntPtr.Zero || small == IntPtr.Zero) return;
+    IntPtr b = SendMessage(hwnd, 0x80, (IntPtr)1, big);            // WM_SETICON, ICON_BIG
+    IntPtr s = SendMessage(hwnd, 0x80, (IntPtr)0, small);          // ICON_SMALL
+    if (!iconSet) { prevBig = b; prevSmall = s; iconSet = true; }
+}
+public static void RestoreWindowIcon(IntPtr hwnd) {
+    if (!iconSet) return;
+    SendMessage(hwnd, 0x80, (IntPtr)1, prevBig);
+    SendMessage(hwnd, 0x80, (IntPtr)0, prevSmall);
+    iconSet = false;
+}
+public static void TaskbarTab(IntPtr hwnd, bool show) {
+    ITaskbarList t = (ITaskbarList)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11d0-958A-006097C9A090")));
+    try { t.HrInit(); if (show) t.AddTab(hwnd); else t.DeleteTab(hwnd); }
+    finally { Marshal.ReleaseComObject(t); }
+}
 '@
     $script:conHwnd = [CLIntFocus.Win]::GetConsoleWindow()
     # Hosts other than conhost (Windows Terminal above all) hand back a
@@ -1451,6 +1514,46 @@ try {
         try { $script:conHwnd = (Get-Process -Id $PID).MainWindowHandle } catch {}
     }
 } catch {}
+
+# The window is conhost's and the process is powershell.exe, so left alone
+# the taskbar shows the PowerShell icon and stacks the menu with every
+# other PowerShell window that happens to be open. Two things fix that,
+# both set on this one window: its own icon, and an app identity of its
+# own - the name the taskbar groups by. The built-in player's window
+# carries the same identity (see Player.ps1), so menu and film are one
+# button, not two programs. The relaunch command is the desktop shortcut's
+# own invocation, which is what makes "Pin to taskbar" on that button pin
+# CLInt rather than a bare PowerShell.
+#
+# Gated on the icon file sitting next to this script: a flat copy (the
+# test harness) has none and keeps its hands off.
+$APP_IDENTITY = 'CLInt.Launcher'
+$script:identitySet = $false
+function Set-MenuIdentity {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    $ico = Join-Path $PSScriptRoot 'CLInt.ico'
+    if (-not (Test-Path $ico)) { return }
+    try {
+        $launch  = Join-Path $script:rootDir 'Launch.ps1'
+        $command = $null
+        if (Test-Path $launch) {
+            $command = "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launch`""
+        }
+        [CLIntFocus.Win]::SetAppIdentity($script:conHwnd, $APP_IDENTITY, $command, "$ico,0", 'CLInt') | Out-Null
+        [CLIntFocus.Win]::SetWindowIcon($script:conHwnd, $ico)
+        $script:identitySet = $true
+    } catch {}
+}
+# A dev shell that ran CLInt by hand gets its own icon and identity back;
+# the app's own window is closing anyway.
+function Clear-MenuIdentity {
+    if (-not $script:identitySet) { return }
+    try {
+        [CLIntFocus.Win]::RestoreWindowIcon($script:conHwnd)
+        [CLIntFocus.Win]::SetAppIdentity($script:conHwnd, $null, $null, $null, $null) | Out-Null
+    } catch {}
+}
+Set-MenuIdentity
 
 # Is the console genuinely off-screen? Losing the foreground is NOT
 # enough: Steam's small "preparing to launch" dialog takes the foreground
@@ -1463,6 +1566,10 @@ function Test-MenuCovered {
     if ($script:conHwnd -eq [IntPtr]::Zero) { return $false }
     try {
         if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) { return $true }
+        # Hidden outright (a windowed film does that - see Player.ps1) is
+        # as off-screen as it gets, wherever the film's window has been
+        # dragged to since.
+        if (-not [CLIntFocus.Win]::IsWindowVisible($script:conHwnd)) { return $true }
         $fg = [CLIntFocus.Win]::GetForegroundWindow()
         if ($fg -eq $script:conHwnd -or $fg -eq [IntPtr]::Zero) { return $false }
         $rf = New-Object CLIntFocus.Win+RECT
@@ -1515,6 +1622,14 @@ function Show-MenuWindow {
             }
             if ([CLIntFocus.Win]::IsIconic($script:conHwnd)) {
                 [CLIntFocus.Win]::ShowWindow($script:conHwnd, 9) | Out-Null   # SW_RESTORE
+            }
+            # Same story for the taskbar button: the player takes this
+            # window's button away while a film is up, so the film's own
+            # is the only CLInt down there, and gives it back as it
+            # leaves. A killed player gives nothing back.
+            if ($script:tabRestore) {
+                $script:tabRestore = $false
+                try { [CLIntFocus.Win]::TaskbarTab($script:conHwnd, $true) } catch {}
             }
             [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null
         } catch {}
@@ -5490,6 +5605,7 @@ try {
                         try {
                             $proc = Start-Process $script:playerHost -ArgumentList $pargs -PassThru -WindowStyle Hidden
                         } catch {}
+                        $script:tabRestore = $true   # see Show-MenuWindow
                         if (-not $proc) {
                             Show-MenuWindow
                             $script:pendingNotice = 'The built-in player would not start. SETTINGS -> Video settings can switch back to the default app.'
@@ -5875,6 +5991,7 @@ try {
     }
 } finally {
     [Console]::CursorVisible = $true
+    Clear-MenuIdentity
     # hand the console back the colours it had (a dev shell keeps its own
     # look; the app's own window is closing anyway)
     try {
