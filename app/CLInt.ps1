@@ -1350,6 +1350,7 @@ function Set-ConsoleFullscreen {
         $Host.UI.RawUI.BufferSize = New-Object System.Management.Automation.Host.Size($ws.Width, $ws.Height)
         Hide-Scrollbars -Repaint
         $script:isFullscreen = $true
+        Set-TaskbarFullscreen $true
     } catch {}
 }
 
@@ -1367,6 +1368,7 @@ function Set-ConsoleWindowed {
         $out = [CLI.Native]::GetStdHandle(-11)
         $coords = 0
         [CLI.Native]::SetConsoleDisplayMode($out, 2, [ref]$coords) | Out-Null
+        Set-TaskbarFullscreen $false
         # A maximized frame survives the mode switch (WS_MAXIMIZE stays
         # set), so the miniature grid below would land inside a
         # screen-filling window - a small menu adrift in dead space (seen
@@ -1456,11 +1458,14 @@ public interface IPropStore {
     [PreserveSig] int SetValue(ref PKEY k, ref PVAR v);
     [PreserveSig] int Commit();
 }
-[ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface ITaskbarList {
+[ComImport, Guid("602D4995-B13A-429b-A66E-1935E44F4317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ITaskbarList {   // ITaskbarList2
     [PreserveSig] int HrInit();
     [PreserveSig] int AddTab(IntPtr hwnd);
     [PreserveSig] int DeleteTab(IntPtr hwnd);
+    [PreserveSig] int ActivateTab(IntPtr hwnd);
+    [PreserveSig] int SetActiveAlt(IntPtr hwnd);
+    [PreserveSig] int MarkFullscreenWindow(IntPtr hwnd, [MarshalAs(UnmanagedType.Bool)] bool full);
 }
 static void PutProp(IPropStore ps, uint pid, string val) {
     PKEY k = new PKEY(); k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"); k.pid = pid;
@@ -1502,6 +1507,11 @@ public static void RestoreWindowIcon(IntPtr hwnd) {
 public static void TaskbarTab(IntPtr hwnd, bool show) {
     ITaskbarList t = (ITaskbarList)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11d0-958A-006097C9A090")));
     try { t.HrInit(); if (show) t.AddTab(hwnd); else t.DeleteTab(hwnd); }
+    finally { Marshal.ReleaseComObject(t); }
+}
+public static void TaskbarFullscreen(IntPtr hwnd, bool full) {
+    ITaskbarList t = (ITaskbarList)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11d0-958A-006097C9A090")));
+    try { t.HrInit(); t.MarkFullscreenWindow(hwnd, full); }
     finally { Marshal.ReleaseComObject(t); }
 }
 '@
@@ -1554,6 +1564,20 @@ function Clear-MenuIdentity {
     } catch {}
 }
 Set-MenuIdentity
+
+# The taskbar steps behind a fullscreen window by spotting it for itself -
+# but only for a window it has tracked all along. The player takes the
+# menu's button away while a film is up and gives it back after (see
+# Show-MenuWindow), and the re-added button comes back without that: the
+# taskbar sat on top of the fullscreen menu after every fullscreen film
+# (reported 2026-10-02, v1.5.0). So say it outright, and keep saying the
+# truth - every display-mode change comes through Set-ConsoleFullscreen or
+# Set-ConsoleWindowed, conhost's own Alt+Enter included (Sync-DisplayMode),
+# and a mark left on a windowed menu would hide the taskbar behind it.
+function Set-TaskbarFullscreen([bool]$full) {
+    if ($script:conHwnd -eq [IntPtr]::Zero) { return }
+    try { [CLIntFocus.Win]::TaskbarFullscreen($script:conHwnd, $full) } catch {}
+}
 
 # Is the console genuinely off-screen? Losing the foreground is NOT
 # enough: Steam's small "preparing to launch" dialog takes the foreground
@@ -1630,6 +1654,11 @@ function Show-MenuWindow {
             if ($script:tabRestore) {
                 $script:tabRestore = $false
                 try { [CLIntFocus.Win]::TaskbarTab($script:conHwnd, $true) } catch {}
+                # ...and a re-added button no longer knows the window is
+                # fullscreen - see Set-TaskbarFullscreen. Read off the
+                # glass: the mode may have changed while the film was up.
+                $dm = [uint32]0
+                if ([CLI.Native]::GetConsoleDisplayMode([ref]$dm)) { Set-TaskbarFullscreen ([bool]($dm -band 1)) }
             }
             [CLIntFocus.Win]::SetForegroundWindow($script:conHwnd) | Out-Null
         } catch {}
@@ -5992,6 +6021,7 @@ try {
 } finally {
     [Console]::CursorVisible = $true
     Clear-MenuIdentity
+    Set-TaskbarFullscreen $false
     # hand the console back the colours it had (a dev shell keeps its own
     # look; the app's own window is closing anyway)
     try {
