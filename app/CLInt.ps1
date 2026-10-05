@@ -2796,6 +2796,28 @@ function Test-EpisodeSibling([string]$finished, [string]$candidate) {
     return (($a.Substring(0, $i) -replace '\d+$', '') -match '\p{L}')
 }
 
+# Folder listings that cannot throw. -Directory and -File are DYNAMIC
+# parameters the FileSystem provider adds, and PowerShell only asks a
+# provider when the path's drive exists - so a Files tab on an unplugged
+# drive (D:\Videos with the drive out) made Get-ChildItem fail to bind
+# '-Directory': a terminating error that -ErrorAction cannot soften, fired
+# from Build-Tabs before the main loop's catch-all exists, and CLInt died at
+# startup with nothing in error.log. A missing folder on a drive that IS
+# there never threw, which is why this took an unplugged drive to find. So:
+# ask whether the folder is there first, catch whatever a drive mid-
+# disconnect still manages to throw, and list an absent folder as empty.
+function Test-FolderPresent([string]$path) {
+    if (-not $path) { return $false }
+    try { return [bool](Test-Path -LiteralPath $path -PathType Container -ErrorAction SilentlyContinue) } catch { return $false }
+}
+function Get-DirEntries([string]$path, [switch]$Dirs) {
+    if (-not (Test-FolderPresent $path)) { return @() }
+    try {
+        if ($Dirs) { return @(Get-ChildItem -LiteralPath $path -Directory -ErrorAction SilentlyContinue | Sort-Object Name) }
+        return @(Get-ChildItem -LiteralPath $path -File -ErrorAction SilentlyContinue | Sort-Object Name)
+    } catch { return @() }
+}
+
 function Add-VideoSections($t, $list, $entries) {
     if (-not $t.Root -or $t.Dir -ne $t.Root) { return @($list) }
     $prefix = $t.Root.TrimEnd('\') + '\'
@@ -2854,7 +2876,7 @@ function Add-VideoSections($t, $list, $entries) {
         foreach ($d in @($latest.Keys | Sort-Object { $latest[$_].When } -Descending)) {
             if ($upNext.Count -ge 5) { break }
             $next = $null
-            foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            foreach ($f in (Get-DirEntries $d)) {   # watch keys may live on a drive that is out
                 if ($f.Name.StartsWith('.')) { continue }
                 if ($f.Extension -notmatch $script:videoExtRe) { continue }
                 if ($f.Name -le $latest[$d].Name) { continue }
@@ -2955,8 +2977,9 @@ function Get-FileItems($t) {
     # -LiteralPath throughout: release folders are full of [1080p][x265]
     # brackets, which -Path reads as wildcard patterns - and the recursive
     # probe THROWS on them right through -ErrorAction SilentlyContinue,
-    # which used to kill the whole menu at startup.
-    $list += @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+    # which used to kill the whole menu at startup. Get-DirEntries for the
+    # folder itself: it may sit on a drive that isn't plugged in (see there).
+    $list += @(Get-DirEntries $dir -Dirs |
         Where-Object { -not $_.Name.StartsWith('.') } |
         Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1).Count -gt 0 } |
@@ -2964,7 +2987,7 @@ function Get-FileItems($t) {
     $resumeEntries = if ($script:videoHistEnabled -or $script:watchingEnabled) { @(Get-ResumeEntries) } else { @() }
     $vlcResume = @{}
     foreach ($e in $resumeEntries) { $vlcResume[$e.Path.ToLower()] = $e.Seconds }
-    $list += @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Sort-Object Name |
+    $list += @(Get-DirEntries $dir |
         Where-Object { -not $_.Name.StartsWith('.') } |
         ForEach-Object {
             $k = $_.FullName.ToLower()
@@ -3189,6 +3212,14 @@ function Get-SettingsItems {
 
 function Get-TabItems([int]$t) {
     if ($tabs[$t].Type -eq 'Settings') { return @(Get-SettingsItems) }
+    # A Files tab whose folder was unreachable when the tabs were built (an
+    # external drive not plugged in yet) listed as empty. Re-list an empty
+    # root every time the tab is asked for, so plugging the drive in and
+    # switching back to the tab is enough - no restart. Cheap while the
+    # folder is still missing: Get-DirEntries answers from one Test-Path.
+    if ($tabs[$t].Type -eq 'Files' -and @($tabs[$t].Items).Count -eq 0 -and $tabs[$t].Dir -eq $tabs[$t].Root) {
+        $tabs[$t].Items = @(Get-FileItems $tabs[$t])
+    }
     return $tabs[$t].Items
 }
 
@@ -3484,12 +3515,19 @@ function Draw-All {
     # wrapped tail lands on the first list row.
     Write-At 15 3 (Pad $help ($W - 16)) $theme.Hint
     Draw-Status
+    Draw-List
+    # AFTER Draw-List: its blanking loop starts at the list top when the list
+    # is empty, and used to wipe this line the moment it was written - the
+    # empty-tab messages below had been invisible for some time.
     if ($items.Count -eq 0) {
         $msg = if ($cur.Type -eq 'Shortcuts') { 'No .lnk shortcuts in this folder - press A to choose another folder or remove this tab.' }
+               # A Files tab on a drive that isn't plugged in: say so, and say
+               # what brings it back (Get-TabItems re-lists it on the way in).
+               elseif ($cur.Type -eq 'Files' -and -not (Test-FolderPresent ([string]$cur.Root))) {
+                   "Can't reach $($cur.Root) - is the drive connected? Come back to this tab once it is." }
                else { 'Nothing found here.' }
         Write-At 6 $listTop (Pad $msg ($W - 8)) $theme.Hint
     }
-    Draw-List
     Hide-Scrollbars   # full redraws follow the moments bars sneak in (launch, game return, tab config)
     if ($script:autoCheck -and -not $script:updateNoticeShown -and
         (Test-Path (Join-Path $script:dataDir 'update-available.txt'))) {
@@ -3943,8 +3981,9 @@ function Get-PickerEntries($dir) {
         $list += [pscustomobject]@{ Name = '..'; Path = $null; Type = 'Up' }
         # Get-ChildItem already skips attribute-hidden folders; also skip
         # dot-prefixed ones (.git, .vscode, ...), hidden by convention.
-        # -LiteralPath: bracketed folder names are wildcards to -Path.
-        $list += @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Sort-Object Name |
+        # -LiteralPath: bracketed folder names are wildcards to -Path. And
+        # Get-DirEntries, because a drive can go away mid-browse.
+        $list += @(Get-DirEntries $dir -Dirs |
             Where-Object { -not $_.Name.StartsWith('.') } |
             ForEach-Object { [pscustomobject]@{ Name = $_.Name + '\'; Path = $_.FullName; Type = 'Dir' } })
     }
