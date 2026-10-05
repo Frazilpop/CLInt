@@ -174,27 +174,6 @@ public static extern int libvlc_audio_set_volume(IntPtr mp, int volume);
 public static extern void libvlc_audio_set_mute(IntPtr mp, int status);
 [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
 public static extern int libvlc_video_get_size(IntPtr mp, uint num, out uint px, out uint py);
-[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
-public static extern IntPtr libvlc_get_version();
-
-// --- frames shown so far: the resume watchdog's evidence (see Toggle-Pause)
-// libvlc_media_stats_t as libvlc 3.x lays it out is four-byte ints and
-// floats back to back, and i_displayed_pictures is the ninth, at byte 32.
-// It is read out of a raw buffer rather than a struct of our own so that a
-// libvlc with another layout can be turned away by version ($script:statsOk)
-// instead of writing past the end of something. -1 when libvlc has no
-// figures to give (stats off, nothing playing yet).
-[DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
-private static extern int libvlc_media_get_stats(IntPtr media, IntPtr stats);
-public static int DisplayedPictures(IntPtr media) {
-    if (media == IntPtr.Zero) return -1;
-    IntPtr buf = Marshal.AllocHGlobal(256);
-    try {
-        for (int i = 0; i < 256; i += 8) Marshal.WriteInt64(buf, i, 0);
-        if (libvlc_media_get_stats(media, buf) == 0) return -1;
-        return Marshal.ReadInt32(buf, 32);
-    } finally { Marshal.FreeHGlobal(buf); }
-}
 
 // --- taskbar identity: the same one CLInt puts on its own window (see
 // Set-MenuIdentity there), so the menu and the film are one button.
@@ -417,24 +396,15 @@ if ([CLIntVlc.N]::LoadLibraryExW((Join-Path $VlcDir 'libvlc.dll'), [IntPtr]::Zer
 
 # --no-video-title-show / --no-osd: this player draws its own overlay, and
 # VLC's would sit on top of it saying the same thing twice.
-#
-# Statistics stay ON (the default): the count of frames shown is how the
-# resume watchdog tells a picture that is playing from one that has stuck
-# (see Toggle-Pause). It is a handful of counters the engine keeps anyway.
 $vlcArgs = @(
     '--no-video-title-show'
     '--no-osd'
     '--no-snapshot-preview'
     '--quiet'
+    '--no-stats'
 )
 $inst = [CLIntVlc.N]::libvlc_new($vlcArgs.Count, $vlcArgs)
 if ($inst -eq [IntPtr]::Zero) { exit 2 }
-# The stats block is read by its 3.x layout, so only a 3.x libvlc is asked.
-$script:statsOk = $false
-try {
-    $v = [Runtime.InteropServices.Marshal]::PtrToStringAnsi([CLIntVlc.N]::libvlc_get_version())
-    $script:statsOk = ($v -and $v.StartsWith('3.'))
-} catch {}
 if ($script:marginOk) {
     try { $script:marginOk = [CLIntVlc.Core]::Supported() } catch { $script:marginOk = $false }
 }
@@ -473,10 +443,12 @@ $script:tracksUntil = $null
 # which would snap the clock and the bar back to where they just came from.
 # Our own figure is the right one until the demuxer catches up.
 $script:seekGuard = 0
-# Armed by a resume, read by the tick: @{ At; Time; Pics } - the tick count
-# to look at, and the clock and frames-shown figures the resume started
-# from. See Toggle-Pause.
-$script:resumeCheck = $null
+# What the current pause has been through, for the resume to judge whether
+# the picture needs un-sticking (see Toggle-Pause): the tick count it began
+# at, and whether the window was minimized or lost the foreground at any
+# point while it lasted.
+$script:pausedAt   = 0
+$script:pausedAway = $false
 
 # Sibling episodes, in the order the browser lists them, so LB/RB walks the
 # season the same way the menu does.
@@ -1261,7 +1233,7 @@ function Start-File([string]$path) {
     $script:lastTime = 0
     $script:lastLen  = 0
     $script:subsPicked = $false
-    $script:resumeCheck = $null
+    $script:pausedAway = $false
     # Tracks are not known the instant play() returns; the timer starts the
     # clock on them once the file is actually playing.
     $script:tracksUntil = $null
@@ -1317,49 +1289,55 @@ function Invoke-Seek([int]$delta) {
     Show-Osd ('{0}{1}s' -f $(if ($delta -gt 0) { '+' } else { '' }), $delta)
 }
 
-# Seek to where we already are. Flushes and rebuilds decoder and vout,
-# which is the point: see the resume watchdog in Toggle-Pause. The guard
-# keeps the clock and bar from snapping to the stale position libvlc
-# reports mid-seek, same as Invoke-Seek.
-function Reseek-Here {
-    $t = [CLIntVlc.N]::libvlc_media_player_get_time($script:mp)
-    if ($t -ge 0) {
-        [CLIntVlc.N]::libvlc_media_player_set_time($script:mp, $t)
-        $script:seekGuard = [Environment]::TickCount + 700
-    }
-}
+# A pause this long, or one the window was minimized or behind something
+# else during, gets the un-sticking re-seek on resume (see Toggle-Pause).
+# Anything shorter, in front of the screen, is left alone.
+$SHORT_PAUSE_MS = 20000
 
 function Toggle-Pause {
     if ($script:mp -eq [IntPtr]::Zero) { return }
     $script:paused = -not $script:paused
     [CLIntVlc.N]::libvlc_media_player_set_pause($script:mp, $(if ($script:paused) { 1 } else { 0 }))
-    $script:resumeCheck = $null
-    if (-not $script:paused) {
+    if ($script:paused) {
+        $script:pausedAt   = [Environment]::TickCount
+        $script:pausedAway = $false
+    } else {
         # Embedded libvlc can come out of a pause with the audio running and
         # the picture frozen on the pre-pause frame: the hardware decoder's
         # surfaces go stale while paused (display power-management, a
         # minimize - and this player pauses itself on every minimize) and
         # the video pipeline never advances again on its own. Re-seeking to
-        # the spot we are already at un-sticks it.
+        # the spot we are already at flushes and rebuilds decoder and vout,
+        # which un-sticks it. The guard keeps the clock and bar from
+        # snapping to the stale position libvlc reports mid-seek, same as
+        # Invoke-Seek.
         #
-        # It used to be done on every resume, and that cost subtitles: a
-        # seek flushes every decoder, the subtitle one included, so the
-        # line on screen is wiped - and a track embedded in the file never
-        # sends it again, because the demuxer picks up from the seek point
-        # and a cue that began before it is behind. Pausing mid-line lost
-        # the rest of the line. So the seek now waits for proof: the tick
-        # looks about a second on, and re-seeks only if the clock has moved
-        # while not one new frame has been shown. A healthy resume - the
-        # usual kind - is left alone and keeps its subtitles.
-        $pics = if ($script:statsOk) { [CLIntVlc.N]::DisplayedPictures($script:media) } else { -1 }
-        if ($pics -ge 0) {
-            $script:resumeCheck = @{
-                At   = [Environment]::TickCount + 1000
-                Time = [CLIntVlc.N]::libvlc_media_player_get_time($script:mp)
-                Pics = $pics
+        # Done on every resume, that cost subtitles: a seek flushes every
+        # decoder, the subtitle one included, so the line on screen is
+        # wiped - and a track embedded in the file never sends it again,
+        # because the demuxer picks up from the seek point and a cue that
+        # began before it is behind. Pausing mid-line lost the rest of the
+        # line.
+        #
+        # So the seek goes by what the pause was like. The stale surfaces
+        # come of the display being put to sleep or the window being put
+        # away, and neither happens to a short pause taken in front of the
+        # screen - which is exactly the pause whose subtitle matters. That
+        # one is left alone. A pause that ran long, or that the window was
+        # minimized or behind something else during, gets the re-seek, and
+        # a line lost there is a line whose moment had already passed.
+        #
+        # (A watchdog that re-seeked only on proof - libvlc's frames-shown
+        # count standing still while the clock moved - was tried first and
+        # did not fire: the engine goes on counting frames it hands to
+        # stale surfaces, so a stuck picture looked like a playing one.)
+        $long = ([Environment]::TickCount - $script:pausedAt) -ge $script:SHORT_PAUSE_MS
+        if ($long -or $script:pausedAway) {
+            $t = [CLIntVlc.N]::libvlc_media_player_get_time($script:mp)
+            if ($t -ge 0) {
+                [CLIntVlc.N]::libvlc_media_player_set_time($script:mp, $t)
+                $script:seekGuard = [Environment]::TickCount + 700
             }
-        } else {
-            Reseek-Here     # no figures to judge by: the old unconditional cure
         }
     }
     # A paused film keeps its overlay up - the tape and the [PAUSED] tag on
@@ -1621,19 +1599,13 @@ $timer.Add_Tick({
     $t = [CLIntVlc.N]::libvlc_media_player_get_time($script:mp)
     if ($t -ge 0 -and [Environment]::TickCount -ge $script:seekGuard) { $script:lastTime = [int]($t / 1000) }
 
-    # The resume watchdog (see Toggle-Pause): a second after a resume, a
-    # clock that has moved on while the frames-shown count has not is a
-    # stuck picture, and gets the re-seek. The count comes from a stats
-    # block libvlc refreshes a few times a second, so a second is enough
-    # for a playing film to have raised it. Anything else - paused again,
-    # stopped, a count that moved - means leave the film be.
-    if ($script:resumeCheck -and [Environment]::TickCount -ge $script:resumeCheck.At) {
-        $rc = $script:resumeCheck
-        $script:resumeCheck = $null
-        if (-not $script:paused -and $st -eq 3 -and $t -ge 0 -and $rc.Time -ge 0 -and ($t - $rc.Time) -ge 400) {
-            $pics = [CLIntVlc.N]::DisplayedPictures($script:media)
-            if ($pics -ge 0 -and $pics -eq $rc.Pics) { Reseek-Here }
-        }
+    # A pause spent minimized or behind another window (fullscreen too, where
+    # $away above does not look) is one the resume must un-stick after. See
+    # Toggle-Pause.
+    if ($script:paused -and -not $script:pausedAway -and
+        (($form.WindowState -eq 'Minimized') -or
+         ([CLIntVlc.N]::GetForegroundWindow() -ne $form.Handle))) {
+        $script:pausedAway = $true
     }
 
     # The resume seek can only land once the demuxer is actually playing;
@@ -1731,9 +1703,13 @@ $form.Add_Resize({
     if ($script:quitting) { return }
     if ($form.WindowState -eq 'Minimized') {
         if ($script:mp -ne [IntPtr]::Zero -and -not $script:paused) {
-            $script:paused = $true
+            $script:paused   = $true
+            $script:pausedAt = [Environment]::TickCount
             [CLIntVlc.N]::libvlc_media_player_set_pause($script:mp, 1)
         }
+        # Put away is put away, however the pause came about: the resume
+        # re-seeks (see Toggle-Pause).
+        $script:pausedAway = $true
         return
     }
     # Any other size change - a windowed resize, a maximize, a mode toggle,
