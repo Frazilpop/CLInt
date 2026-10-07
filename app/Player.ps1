@@ -436,6 +436,8 @@ $script:osdNote   = ''           # transient right-hand message ("Volume 60%")
 $script:quitting  = $false
 # Subtitle auto-pick, once per file. See the block in the timer that uses it.
 $script:subsPicked = $false
+# Same for putting back the audio track this file was last left on.
+$script:audioPicked = $false
 # Tick count a file's track lists are taken as complete at; $null until the
 # file is first seen playing. See Test-TracksPending.
 $script:tracksUntil = $null
@@ -461,6 +463,64 @@ try {
         Sort-Object Name | Select-Object -ExpandProperty FullName)
 } catch {}
 if ($script:siblings.Count -eq 0) { $script:siblings = @($Video) }
+
+# The subtitle and audio track each file was last left on, so a film
+# watched in Japanese with English subtitles comes back that way. Lives
+# beside the state file in CLInt's data folder; a standalone run without
+# one just doesn't remember. Keyed by lower-cased path, the way CLInt keys
+# resume.json. Only a choice the user made with X or Y is written - a file
+# nobody touched keeps following VLC's pick and the subtitles setting.
+#
+# A track is stored as its libvlc id AND its name. Ids are what VLC hands
+# back for the same file every time, but a sidecar .srt added or removed
+# can shift them, so a stored track must match on both - failing that, on
+# name alone - before it is trusted. Neither matching leaves the file to
+# the defaults rather than guessing.
+$script:trackFile  = $null
+$script:trackPrefs = @{}
+if ($StateFile) {
+    $script:trackFile = Join-Path (Split-Path -Parent $StateFile) 'track-prefs.json'
+    if (Test-Path -LiteralPath $script:trackFile) {
+        try {
+            (Get-Content -LiteralPath $script:trackFile -Raw -Encoding utf8 | ConvertFrom-Json).PSObject.Properties |
+                ForEach-Object {
+                    $e = @{}
+                    foreach ($kind in 'Spu', 'Audio') {
+                        $t = $_.Value.$kind
+                        if ($null -ne $t -and $null -ne $t.Id) { $e[$kind] = @{ Id = [int]$t.Id; Name = [string]$t.Name } }
+                    }
+                    if ($e.Count) { $script:trackPrefs[$_.Name] = $e }
+                }
+        } catch { $script:trackPrefs = @{} }
+    }
+}
+
+function Get-TrackPref([string]$kind) {
+    if (-not $script:current) { return $null }
+    $e = $script:trackPrefs[$script:current.ToLowerInvariant()]
+    if ($e) { return $e[$kind] }
+    return $null
+}
+
+function Save-TrackPref([string]$kind, $track) {
+    if (-not $script:trackFile -or -not $script:current) { return }
+    $key = $script:current.ToLowerInvariant()
+    if (-not $script:trackPrefs.ContainsKey($key)) { $script:trackPrefs[$key] = @{} }
+    $script:trackPrefs[$key][$kind] = @{ Id = [int]$track.Id; Name = [string]$track.Name }
+    try {
+        $script:trackPrefs | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:trackFile -Encoding utf8
+    } catch {}
+}
+
+# The entry in $tracks the stored $pref refers to, or $null.
+function Find-PrefTrack($tracks, $pref) {
+    if (-not $pref) { return $null }
+    $hit = @($tracks | Where-Object { $_.Id -eq $pref.Id -and $_.Name -eq $pref.Name })
+    if ($hit.Count) { return $hit[0] }
+    $hit = @($tracks | Where-Object { $_.Name -eq $pref.Name })
+    if ($hit.Count -eq 1) { return $hit[0] }
+    return $null
+}
 
 function Get-SiblingIndex {
     for ($i = 0; $i -lt $script:siblings.Count; $i++) {
@@ -1233,6 +1293,7 @@ function Start-File([string]$path) {
     $script:lastTime = 0
     $script:lastLen  = 0
     $script:subsPicked = $false
+    $script:audioPicked = $false
     $script:pausedAway = $false
     # Tracks are not known the instant play() returns; the timer starts the
     # clock on them once the file is actually playing.
@@ -1383,6 +1444,9 @@ function Step-Spu {
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
     $next = $tracks[($i + 1) % $tracks.Count]
     [CLIntVlc.N]::libvlc_video_set_spu($script:mp, $next.Id) | Out-Null
+    # The user's own choice now outranks the once-per-file default pick.
+    $script:subsPicked = $true
+    Save-TrackPref 'Spu' $next
     Show-Note ("Subs: " + $(if ($next.Id -eq -1) { 'off' } else { $next.Name }))
 }
 
@@ -1399,6 +1463,8 @@ function Step-Audio {
     for ($j = 0; $j -lt $tracks.Count; $j++) { if ($tracks[$j].Id -eq $cur) { $i = $j; break } }
     $next = $tracks[($i + 1) % $tracks.Count]
     [CLIntVlc.N]::libvlc_audio_set_track($script:mp, $next.Id) | Out-Null
+    $script:audioPicked = $true
+    Save-TrackPref 'Audio' $next
     Show-Note ("Audio: " + $next.Name)
 }
 
@@ -1641,16 +1707,32 @@ $timer.Add_Tick({
     if ($null -eq $script:tracksUntil -and ($st -eq 3 -or $st -eq 4)) {
         $script:tracksUntil = [Environment]::TickCount + 5000
     }
+    #
+    # A file the user has picked tracks for before (X/Y - see
+    # Save-TrackPref) gets those back instead: their choice for this file
+    # beats the general setting. A stored track that hasn't turned up yet
+    # is waited for while the lists are still filling, then given up on in
+    # favour of the defaults. Both restores share one note so neither hides
+    # the other.
+    $notes = @()
     if (-not $script:subsPicked -and $st -eq 3) {
         $subs = Get-TrackList ([CLIntVlc.N]::libvlc_video_get_spu_description($script:mp))
-        if ($subs.Count -gt 1) {
+        $pref = Get-TrackPref 'Spu'
+        $want = Find-PrefTrack $subs $pref
+        if ($subs.Count -gt 1 -and $want) {
+            $script:subsPicked = $true
+            if ([CLIntVlc.N]::libvlc_video_get_spu($script:mp) -ne $want.Id) {
+                [CLIntVlc.N]::libvlc_video_set_spu($script:mp, $want.Id) | Out-Null
+            }
+            if ($want.Id -ne -1) { $notes += "Subs: $($want.Name)" }
+        } elseif ($subs.Count -gt 1 -and -not ($pref -and (Test-TracksPending))) {
             $script:subsPicked = $true
             $cur = [CLIntVlc.N]::libvlc_video_get_spu($script:mp)
             if ($Subtitles) {
                 if ($cur -eq -1) {
                     $first = @($subs | Where-Object { $_.Id -ne -1 })[0]
                     [CLIntVlc.N]::libvlc_video_set_spu($script:mp, $first.Id) | Out-Null
-                    Show-Note ("Subs: " + $first.Name) 3000
+                    $notes += "Subs: $($first.Name)"
                 }
             } elseif ($cur -ne -1) {
                 [CLIntVlc.N]::libvlc_video_set_spu($script:mp, -1) | Out-Null
@@ -1659,6 +1741,26 @@ $timer.Add_Tick({
             $script:subsPicked = $true      # this file has none; stop asking
         }
     }
+    if (-not $script:audioPicked -and $st -eq 3) {
+        $pref = Get-TrackPref 'Audio'
+        if (-not $pref) {
+            $script:audioPicked = $true     # nothing stored; VLC's pick stands
+        } else {
+            $auds = @(Get-TrackList ([CLIntVlc.N]::libvlc_audio_get_track_description($script:mp)) |
+                      Where-Object { $_.Id -ne -1 })
+            $want = Find-PrefTrack $auds $pref
+            if ($want) {
+                $script:audioPicked = $true
+                if ([CLIntVlc.N]::libvlc_audio_get_track($script:mp) -ne $want.Id) {
+                    [CLIntVlc.N]::libvlc_audio_set_track($script:mp, $want.Id) | Out-Null
+                    $notes += "Audio: $($want.Name)"
+                }
+            } elseif (-not (Test-TracksPending)) {
+                $script:audioPicked = $true
+            }
+        }
+    }
+    if ($notes.Count) { Show-Note ($notes -join '   ') 3000 }
 
     # A windowed film keeps the frame it was given - the menu's own. It
     # used to be trimmed to the picture's shape once the size was known,

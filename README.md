@@ -186,6 +186,11 @@ video and for tracks built into the file itself. X switches between them
 either way. While the bar along the bottom is showing, subtitles move up
 to sit above it, and drop back when it goes.
 
+Pick a subtitle or audio track with X or Y and CLInt remembers it for
+that video: open it again and it comes back the way you left it,
+subtitles switched off included. That choice wins over Subtitles on by
+default for that one video.
+
 Stopping when the credits roll counts as watching to the end — the play
 is recorded and the next episode queues under UP NEXT. **SETTINGS →
 Video settings → Counts as watched at** sets where that kicks in (95% of
