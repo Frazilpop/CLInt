@@ -25,6 +25,8 @@ A minimalist interface with configurable tabs to load the following:
   player or whatever you normally use. Half-watched videos are remembered
   and rise to the top, and finishing an episode queues the folder's next
   one under UP NEXT. Both sections can be turned off in Video settings.
+  A folder on an external drive that isn't plugged in says so; plug the
+  drive in and come back to the tab, no restart needed.
 - **SETTINGS** — deep app customisation,
   persisted to `data\settings.json`.
   
@@ -52,7 +54,7 @@ back up). Delete the folder afterwards if you want CLInt gone completely.
 
 ## TDP – Motion Assistant support (for WIN GPD Devices)
 
-  Built-in support for machines with GDP Motion Assistant. RB
+  Built-in support for machines with GPD Motion Assistant. RB
   cycles between default and per-game wattage profile, applied with
   Motion Assistant's bundled `ryzenadj` (works unelevated because its
   driver is already loaded), re-asserted just after the game starts
@@ -264,8 +266,8 @@ section, for when it suggests an episode already seen.
 ## HotKey
 
 A global hardware key that opens/hides the CLInt menu from anywhere. Can
-be set up when running the installer or found ynder **SETTINGS → Menu key**
-It requires AutoHotkey v2, which either side willinstall for you. Skipping 
+be set up when running the installer or found under **SETTINGS → Menu key**.
+It requires AutoHotkey v2, which either side will install for you. Skipping 
 it entirely is fine; the desktop shortcut does the same job.
 
 Press it and nothing happens? **SETTINGS → Menu key** shows whether it is
